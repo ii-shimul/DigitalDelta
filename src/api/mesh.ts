@@ -1,9 +1,11 @@
 import type { Scalar as SQLiteScalar } from '@op-engineering/op-sqlite';
 
 import {
+  computeMeshThrottleSimulation,
   createSQLiteMeshRelayService,
-  encodeUtf8,
   decodeUtf8,
+  encodeUtf8,
+  type MeshThrottleSimulationResult,
   type MeshActor,
 } from '../core';
 import { getDatabase } from '../db';
@@ -64,6 +66,8 @@ export type MeshRelaySnapshot = {
     recipient: MeshRelayLogItem[];
   };
 };
+
+export type { MeshThrottleSimulationResult };
 
 export class MeshApi {
   private readonly relayService = createSQLiteMeshRelayService();
@@ -335,6 +339,100 @@ export class MeshApi {
     };
   }
 
+  async simulateBatteryAwareThrottle(input: {
+    loginData: LoginScreenData;
+    session?: AuthenticatedSession;
+    batteryPercent?: number;
+    signalStrength?: number;
+    nearbyPeerCount?: number;
+    stationary?: boolean;
+    knownNodeDistanceMeters?: number;
+    durationMinutes?: number;
+    baseBroadcastIntervalMs?: number;
+  }): Promise<MeshThrottleSimulationResult> {
+    const actor = buildActor(input.loginData, input.session);
+    const inferred = await this.inferNodeMetrics(actor.deviceId);
+    const proximity = await this.inferKnownNodeProximity(input.loginData.userId);
+
+    const batteryPercent = clampPercent(
+      input.batteryPercent ?? inferred.batteryPercent,
+    );
+    const signalStrength = clampPercent(
+      input.signalStrength ?? inferred.signalStrength,
+    );
+    const nearbyPeerCount = Math.max(
+      0,
+      input.nearbyPeerCount ?? inferred.nearbyPeerCount,
+    );
+    const stationary = Boolean(input.stationary);
+    const knownNodeDistanceMeters = Math.max(
+      0,
+      input.knownNodeDistanceMeters ?? proximity.distanceMeters,
+    );
+
+    const simulation = computeMeshThrottleSimulation({
+      durationMinutes: input.durationMinutes,
+      baseBroadcastIntervalMs: input.baseBroadcastIntervalMs,
+      batteryPercent,
+      signalStrength,
+      nearbyPeerCount,
+      stationary,
+      knownNodeDistanceMeters,
+      nearestNodeId: proximity.nearestNodeId,
+    });
+
+    const db = await getDatabase();
+    const row = await db.execute(
+      `
+        SELECT metadata_json AS metadataJson
+        FROM mesh_node_state
+        WHERE device_id = ?
+        LIMIT 1
+      `,
+      [actor.deviceId],
+    );
+    const metadata = parseJsonRecord(row.rows[0]?.metadataJson);
+
+    await db.execute(
+      `
+        INSERT OR REPLACE INTO mesh_node_state (
+          device_id,
+          current_role,
+          relay_score,
+          battery_percent,
+          signal_strength,
+          nearby_peer_count,
+          last_role_changed_at_ms,
+          last_evaluated_at_ms,
+          metadata_json
+        ) VALUES (?,
+          COALESCE((SELECT current_role FROM mesh_node_state WHERE device_id = ?), 'client'),
+          COALESCE((SELECT relay_score FROM mesh_node_state WHERE device_id = ?), 0),
+          ?, ?, ?,
+          (SELECT last_role_changed_at_ms FROM mesh_node_state WHERE device_id = ?),
+          ?,
+          ?
+        )
+      `,
+      [
+        actor.deviceId,
+        actor.deviceId,
+        actor.deviceId,
+        batteryPercent,
+        signalStrength,
+        nearbyPeerCount,
+        actor.deviceId,
+        Date.now(),
+        JSON.stringify({
+          ...metadata,
+          lastThrottleSimulation: simulation,
+        }),
+      ],
+    );
+
+    return simulation;
+  }
+
   private async inferNodeMetrics(deviceId: string): Promise<{
     batteryPercent: number;
     signalStrength: number;
@@ -369,6 +467,89 @@ export class MeshApi {
         0,
         asNumber(row?.nearbyPeerCount) || asNumber(peerCountResult.rows[0]?.count),
       ),
+    };
+  }
+
+  private async inferKnownNodeProximity(userId: string): Promise<{
+    nearestNodeId?: string;
+    distanceMeters: number;
+  }> {
+    const db = await getDatabase();
+    const vehicleResult = await db.execute(
+      `
+        SELECT
+          latitude,
+          longitude,
+          current_node_id AS currentNodeId
+        FROM vehicles
+        WHERE metadata_json LIKE ?
+        ORDER BY COALESCE(last_seen_at_ms, 0) DESC, vehicle_id ASC
+        LIMIT 1
+      `,
+      [`%${userId}%`],
+    );
+    const vehicleRow = vehicleResult.rows[0];
+    const currentNodeId = asOptionalString(vehicleRow?.currentNodeId);
+
+    if (currentNodeId) {
+      return {
+        nearestNodeId: currentNodeId,
+        distanceMeters: 0,
+      };
+    }
+
+    const latitude = asOptionalNumber(vehicleRow?.latitude);
+    const longitude = asOptionalNumber(vehicleRow?.longitude);
+
+    if (typeof latitude !== 'number' || typeof longitude !== 'number') {
+      return {
+        distanceMeters: 750,
+      };
+    }
+
+    const nodesResult = await db.execute(
+      `
+        SELECT
+          node_id AS nodeId,
+          latitude,
+          longitude
+        FROM network_nodes
+        WHERE is_active = 1
+      `,
+    );
+
+    let nearestNodeId: string | undefined;
+    let nearestDistanceMeters = Number.POSITIVE_INFINITY;
+
+    for (const row of nodesResult.rows) {
+      const nodeLatitude = asOptionalNumber(row.latitude);
+      const nodeLongitude = asOptionalNumber(row.longitude);
+
+      if (typeof nodeLatitude !== 'number' || typeof nodeLongitude !== 'number') {
+        continue;
+      }
+
+      const meters = haversineMeters(
+        latitude,
+        longitude,
+        nodeLatitude,
+        nodeLongitude,
+      );
+      if (meters < nearestDistanceMeters) {
+        nearestDistanceMeters = meters;
+        nearestNodeId = asOptionalString(row.nodeId);
+      }
+    }
+
+    if (!Number.isFinite(nearestDistanceMeters)) {
+      return {
+        distanceMeters: 750,
+      };
+    }
+
+    return {
+      nearestNodeId,
+      distanceMeters: nearestDistanceMeters,
     };
   }
 
@@ -450,6 +631,54 @@ function buildActor(
 
 function clampPercent(value: number): number {
   return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function haversineMeters(
+  fromLat: number,
+  fromLon: number,
+  toLat: number,
+  toLon: number,
+): number {
+  const toRadians = (value: number) => (value * Math.PI) / 180;
+  const earthRadiusMeters = 6_371_000;
+
+  const latitudeDelta = toRadians(toLat - fromLat);
+  const longitudeDelta = toRadians(toLon - fromLon);
+
+  const a =
+    Math.sin(latitudeDelta / 2) * Math.sin(latitudeDelta / 2) +
+    Math.cos(toRadians(fromLat)) *
+      Math.cos(toRadians(toLat)) *
+      Math.sin(longitudeDelta / 2) *
+      Math.sin(longitudeDelta / 2);
+
+  return 2 * earthRadiusMeters * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function parseJsonRecord(value: Scalar | unknown): Record<string, unknown> {
+  if (typeof value !== 'string' || value.length === 0) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return {};
+    }
+
+    return parsed as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+function asOptionalNumber(value: Scalar | unknown): number | undefined {
+  if (value === null || typeof value === 'undefined') {
+    return undefined;
+  }
+
+  const parsed = asNumber(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function asOptionalString(value: Scalar | unknown): string | undefined {

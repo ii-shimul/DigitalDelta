@@ -9,6 +9,7 @@ module.exports = {
     '**/__tests__/module4.test.ts',
     '**/__tests__/module5.test.ts',
     '**/__tests__/module6.test.ts',
+    '**/__tests__/module8.test.ts',
   ],
   moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json'],
 };
