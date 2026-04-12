@@ -21,10 +21,18 @@ import type {
   AuthOtpChallenge,
   AuthRole,
   AuthenticatedSession,
+  DeltaSyncCycleResult,
   DashboardScreenData,
   LoginScreenData,
 } from '../../../api';
-import { AUTH_ROLES, AuthApi, getAvailableAuthRoles } from '../../../api';
+import {
+  AUTH_ROLES,
+  AuthApi,
+  SyncApi,
+  getAvailableAuthRoles,
+  getDashboardScreenData,
+  resolveDashboardConflict,
+} from '../../../api';
 import type { BottomTabScreen } from '../../navigation/contracts';
 import {
   ROLE_ALLOWED_SCREENS,
@@ -42,7 +50,16 @@ type AuthNotice = {
   message: string;
 };
 
+type LiveNotification = {
+  id: string;
+  tone: AuthNotice['tone'];
+  title: string;
+  message: string;
+  occurredAtMs: number;
+};
+
 const authApi = new AuthApi();
+const syncApi = new SyncApi();
 
 const MAIN_TAB_ITEMS: Array<{
   label: string;
@@ -91,6 +108,17 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
   const [requestingFieldOtp, setRequestingFieldOtp] = useState(false);
   const [auditTerminalLines, setAuditTerminalLines] = useState<string[]>([]);
   const [nowMs, setNowMs] = useState(() => Date.now());
+  const [liveDashboardData, setLiveDashboardData] =
+    useState<DashboardScreenData>(dashboardData);
+  const [liveNotifications, setLiveNotifications] = useState<LiveNotification[]>(
+    [],
+  );
+  const [syncingMesh, setSyncingMesh] = useState(false);
+  const [lastSyncCycle, setLastSyncCycle] =
+    useState<DeltaSyncCycleResult | null>(null);
+  const [resolvingConflictId, setResolvingConflictId] = useState<string | null>(
+    null,
+  );
   const [requestingOtp, setRequestingOtp] = useState(false);
   const [verifyingOtp, setVerifyingOtp] = useState(false);
   const [rotatingKey, setRotatingKey] = useState(false);
@@ -102,11 +130,12 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
     keyAlgorithm: loginData.keyAlgorithm,
     keyFingerprint: loginData.keyFingerprint,
   });
+  const dashboard = liveDashboardData;
   const isWideLayout = width >= 768;
-  const routeSummary = dashboardData.routes[0];
-  const supplySummaries = dashboardData.supplies.slice(0, 3);
-  const nodeSummaries = dashboardData.nodeHealth.slice(0, 3);
-  const triageAlerts = dashboardData.triageAlerts.slice(0, 3);
+  const routeSummary = dashboard.routes[0];
+  const supplySummaries = dashboard.supplies.slice(0, 3);
+  const nodeSummaries = dashboard.nodeHealth.slice(0, 3);
+  const triageAlerts = dashboard.triageAlerts.slice(0, 3);
   const allowedScreens = activeSession
     ? ROLE_ALLOWED_SCREENS[activeSession.activeRole]
     : [];
@@ -116,7 +145,7 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
       : 'Enter 6-digit code'
     : 'Get code';
   const syncTimestampLabel = formatZuluTimestamp(
-    dashboardData.sync.lastSyncedAtMs ?? loginData.lastLoginAtMs,
+    dashboard.sync.lastSyncedAtMs ?? loginData.lastLoginAtMs,
   );
   const containerClassName = isWideLayout
     ? 'w-full max-w-[760px] self-center px-6'
@@ -133,6 +162,37 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
       keyFingerprint: loginData.keyFingerprint,
     });
   }, [loginData]);
+
+  useEffect(() => {
+    setLiveDashboardData(dashboardData);
+  }, [dashboardData]);
+
+  useEffect(() => {
+    let isActive = true;
+
+    const pollDashboard = async () => {
+      try {
+        const nextDashboard = await getDashboardScreenData();
+        if (!isActive) {
+          return;
+        }
+
+        setLiveDashboardData(previousDashboard => {
+          emitRealtimeNotifications(previousDashboard, nextDashboard);
+          return nextDashboard;
+        });
+      } catch {
+        // Keep local state when polling fails; this must not block offline usage.
+      }
+    };
+
+    const timerId = setInterval(pollDashboard, 4000);
+
+    return () => {
+      isActive = false;
+      clearInterval(timerId);
+    };
+  }, []);
 
   useEffect(() => {
     if (!otpChallenge) {
@@ -179,6 +239,87 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
       )
     : 0;
 
+  function pushLiveNotification(input: {
+    tone: LiveNotification['tone'];
+    title: string;
+    message: string;
+  }) {
+    const event: LiveNotification = {
+      id: `ntf-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      tone: input.tone,
+      title: input.title,
+      message: input.message,
+      occurredAtMs: Date.now(),
+    };
+
+    setLiveNotifications(previous => [event, ...previous].slice(0, 24));
+  }
+
+  function emitRealtimeNotifications(
+    previousDashboard: DashboardScreenData,
+    nextDashboard: DashboardScreenData,
+  ) {
+    if (previousDashboard.connectivityState !== nextDashboard.connectivityState) {
+      pushLiveNotification({
+        tone:
+          nextDashboard.connectivityState === 'verified'
+            ? 'success'
+            : nextDashboard.connectivityState === 'conflict-detected'
+              ? 'warning'
+              : 'default',
+        title: 'Connectivity state updated',
+        message: `${formatConnectivityLabel(previousDashboard.connectivityState)} -> ${formatConnectivityLabel(nextDashboard.connectivityState)}`,
+      });
+    }
+
+    if (
+      nextDashboard.sync.lastSyncedAtMs &&
+      nextDashboard.sync.lastSyncedAtMs !== previousDashboard.sync.lastSyncedAtMs
+    ) {
+      pushLiveNotification({
+        tone: 'success',
+        title: 'Sync verified',
+        message: `Last synced ${formatZuluTimestamp(nextDashboard.sync.lastSyncedAtMs)}`,
+      });
+    }
+
+    if (
+      nextDashboard.sync.queuedEnvelopeCount !==
+        previousDashboard.sync.queuedEnvelopeCount ||
+      nextDashboard.sync.inFlightEnvelopeCount !==
+        previousDashboard.sync.inFlightEnvelopeCount
+    ) {
+      pushLiveNotification({
+        tone: 'default',
+        title: 'Sync queue changed',
+        message: `Queued ${nextDashboard.sync.queuedEnvelopeCount} · In flight ${nextDashboard.sync.inFlightEnvelopeCount}`,
+      });
+    }
+
+    const unresolvedBefore = previousDashboard.conflicts.filter(
+      conflict => !conflict.resolvedAtMs,
+    ).length;
+    const unresolvedNow = nextDashboard.conflicts.filter(
+      conflict => !conflict.resolvedAtMs,
+    ).length;
+
+    if (unresolvedNow > unresolvedBefore) {
+      pushLiveNotification({
+        tone: 'warning',
+        title: 'New conflict detected',
+        message: `${unresolvedNow} unresolved conflict${unresolvedNow === 1 ? '' : 's'}`,
+      });
+    }
+
+    if (unresolvedNow < unresolvedBefore) {
+      pushLiveNotification({
+        tone: 'success',
+        title: 'Conflict resolved',
+        message: `${unresolvedNow} unresolved conflict${unresolvedNow === 1 ? '' : 's'} remaining`,
+      });
+    }
+  }
+
   async function handleRequestOtp() {
     setRequestingOtp(true);
     setAuthNotice(null);
@@ -196,12 +337,25 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
         title: 'Code issued',
         message: 'Use the alert dialog or enter the code below.',
       });
+      pushLiveNotification({
+        tone: 'success',
+        title: 'OTP issued',
+        message: `Role ${formatRoleLabel(challenge.requestedRole)} · expires in ${Math.max(0, Math.ceil((challenge.expiresAtMs - Date.now()) / 1000))}s`,
+      });
       notifyOtpCode(challenge);
       setNowMs(Date.now());
     } catch (error) {
       setAuthNotice({
         tone: 'danger',
         title: 'Unable to issue OTP',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'The auth service could not issue an OTP.',
+      });
+      pushLiveNotification({
+        tone: 'danger',
+        title: 'OTP request failed',
         message:
           error instanceof Error
             ? error.message
@@ -257,6 +411,11 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
         title: 'Signed in',
         message: `Session active · ${formatRoleLabel(result.session.activeRole)}`,
       });
+      pushLiveNotification({
+        tone: 'success',
+        title: 'Login verified',
+        message: `${formatRoleLabel(result.session.activeRole)} access granted`,
+      });
       setKeySnapshot(previousSnapshot => ({
         keyProvisioned: true,
         keyAlgorithm:
@@ -274,6 +433,14 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
       setAuthNotice({
         tone: 'danger',
         title: 'Verification failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'The auth service could not verify the OTP.',
+      });
+      pushLiveNotification({
+        tone: 'danger',
+        title: 'OTP verification failed',
         message:
           error instanceof Error
             ? error.message
@@ -299,8 +466,21 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
         title: 'Key rotated',
         message: 'New device key stored and registered.',
       });
+      pushLiveNotification({
+        tone: 'success',
+        title: 'Device key rotated',
+        message: identity.keyFingerprint,
+      });
     } catch (error) {
       setAuthNotice({
+        tone: 'danger',
+        title: 'Key rotation failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'The secure key vault could not rotate the device key.',
+      });
+      pushLiveNotification({
         tone: 'danger',
         title: 'Key rotation failed',
         message:
@@ -340,8 +520,23 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
           ? `${nextAuditStatus.scannedEntries} entries OK`
           : `Broken chain at ${nextAuditStatus.brokenLogId ?? 'unknown'}`,
       });
+      pushLiveNotification({
+        tone: nextAuditStatus.valid ? 'success' : 'danger',
+        title: nextAuditStatus.valid ? 'Audit chain verified' : 'Audit chain failed',
+        message: nextAuditStatus.valid
+          ? `${nextAuditStatus.scannedEntries} entries checked`
+          : `Broken at ${nextAuditStatus.brokenLogId ?? 'unknown'}`,
+      });
     } catch (error) {
       setAuthNotice({
+        tone: 'danger',
+        title: 'Audit verification failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'The audit chain could not be checked.',
+      });
+      pushLiveNotification({
         tone: 'danger',
         title: 'Audit verification failed',
         message:
@@ -377,6 +572,13 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
           ? `Entry ${result.logId} modified. Run verify.`
           : 'No audit entries.',
       });
+      pushLiveNotification({
+        tone: result.corrupted ? 'warning' : 'default',
+        title: result.corrupted ? 'Audit tamper injected' : 'No audit entry available',
+        message: result.corrupted
+          ? `Target ${result.logId}`
+          : 'No audit entries to corrupt.',
+      });
     } catch (error) {
       setAuthNotice({
         tone: 'danger',
@@ -386,8 +588,135 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
             ? error.message
             : 'The demo corruption step could not be applied.',
       });
+      pushLiveNotification({
+        tone: 'danger',
+        title: 'Tamper injection failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'The demo corruption step could not be applied.',
+      });
     } finally {
       setInjectingAuditCorruption(false);
+    }
+  }
+
+  async function handleResolveConflict(
+    conflictId: string,
+    resolution: 'local' | 'remote' | 'merged' | 'manual',
+  ) {
+    if (!activeSession) {
+      return;
+    }
+
+    setResolvingConflictId(conflictId);
+
+    try {
+      await resolveDashboardConflict({
+        conflictId,
+        resolution,
+        actor: {
+          userId: activeSession.userId,
+          deviceId: activeSession.deviceId,
+          role: activeSession.activeRole,
+        },
+      });
+
+      const refreshedDashboard = await getDashboardScreenData();
+      setLiveDashboardData(previousDashboard => {
+        emitRealtimeNotifications(previousDashboard, refreshedDashboard);
+        return refreshedDashboard;
+      });
+
+      setAuthNotice({
+        tone: 'success',
+        title: 'Conflict resolved',
+        message: `${conflictId} resolved using ${resolution}.`,
+      });
+      pushLiveNotification({
+        tone: 'success',
+        title: 'Conflict resolution committed',
+        message: `${conflictId} -> ${resolution}`,
+      });
+    } catch (error) {
+      setAuthNotice({
+        tone: 'danger',
+        title: 'Conflict resolution failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Could not resolve the selected conflict.',
+      });
+      pushLiveNotification({
+        tone: 'danger',
+        title: 'Conflict resolution failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Could not resolve the selected conflict.',
+      });
+    } finally {
+      setResolvingConflictId(null);
+    }
+  }
+
+  async function handleRunMeshSync(options: {
+    injectConcurrentPeerMutation: boolean;
+  }) {
+    if (!activeSession) {
+      return;
+    }
+
+    setSyncingMesh(true);
+
+    try {
+      const result = await syncApi.runDeltaSyncCycle({
+        loginData,
+        session: activeSession,
+        transport: 'bluetooth_le',
+        injectConcurrentPeerMutation: options.injectConcurrentPeerMutation,
+      });
+
+      setLastSyncCycle(result);
+
+      const refreshedDashboard = await getDashboardScreenData();
+      setLiveDashboardData(previousDashboard => {
+        emitRealtimeNotifications(previousDashboard, refreshedDashboard);
+        return refreshedDashboard;
+      });
+
+      setAuthNotice({
+        tone: result.conflictsDetected > 0 ? 'warning' : 'success',
+        title:
+          result.conflictsDetected > 0
+            ? 'Sync completed with conflicts'
+            : 'Sync completed',
+        message: `Peer ${result.peerDeviceId} · Exported ${result.exportedEventCount} · Imported ${result.importedEventCount} · ${result.envelopeSizeBytes} bytes · BLE ${result.transportSent ? 'sent' : 'pending'}`,
+      });
+      pushLiveNotification({
+        tone: result.conflictsDetected > 0 ? 'warning' : 'success',
+        title: 'Delta sync cycle finished',
+        message: `${result.transport} · sent=${String(result.transportSent)} · exported ${result.exportedEventCount} · imported ${result.importedEventCount} · conflicts ${result.conflictsDetected}`,
+      });
+    } catch (error) {
+      setAuthNotice({
+        tone: 'danger',
+        title: 'Sync failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Sync engine failed to complete this cycle.',
+      });
+      pushLiveNotification({
+        tone: 'danger',
+        title: 'Sync failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Sync engine failed to complete this cycle.',
+      });
+    } finally {
+      setSyncingMesh(false);
     }
   }
 
@@ -404,6 +733,8 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
     setScanDemoState('idle');
     setExpandedConflictId(null);
     setAuditTerminalLines([]);
+    setLiveNotifications([]);
+    setLastSyncCycle(null);
     setKeySnapshot({
       keyProvisioned: loginData.keyProvisioned,
       keyAlgorithm: loginData.keyAlgorithm,
@@ -497,6 +828,7 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
             </View>
 
             {authNotice ? renderNoticeCard() : null}
+            {renderLiveNotifications()}
 
             {selectedTab === 'Command' ? renderCommandTab() : null}
             {selectedTab === 'Inventory' ? renderInventoryTab() : null}
@@ -554,6 +886,11 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
       title: error.title,
       message: error.message,
     });
+    pushLiveNotification({
+      tone: error.code === 'ACCESS_DENIED' ? 'warning' : 'danger',
+      title: error.title,
+      message: error.message,
+    });
   }
 
   function notifyOtpCode(challenge: AuthOtpChallenge) {
@@ -605,7 +942,7 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
               Role
             </Text>
             <Text className="text-[12px] text-[#9EB0D0]">
-              {formatConnectivityLabel(dashboardData.connectivityState)}
+              {formatConnectivityLabel(dashboard.connectivityState)}
             </Text>
           </View>
           <View className="mt-3 flex-row flex-wrap gap-2">
@@ -695,6 +1032,7 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
         </View>
 
         {authNotice ? renderNoticeCard() : null}
+        {renderLiveNotifications()}
       </View>
     );
   }
@@ -730,7 +1068,7 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
           </Text>
         </View>
 
-        {dashboardData.triageAlerts.slice(1).map(alert => (
+        {dashboard.triageAlerts.slice(1).map(alert => (
           <View
             key={`triage-${alert.deliveryId}-${alert.decidedAtMs}`}
             className="rounded-xl border border-[#5C3D28] bg-[#2A1E16] px-4 py-3"
@@ -783,7 +1121,7 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
           <Text className="text-[11px] font-semibold uppercase tracking-wider text-[#7A8BAD]">
             Vehicles
           </Text>
-          {dashboardData.nodeHealth.map(node => (
+          {dashboard.nodeHealth.map(node => (
             <View
               key={node.vehicleId}
               className="flex-row items-center justify-between rounded-xl border border-[#20314D] bg-[#202C41] px-3 py-3"
@@ -873,7 +1211,7 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
   function renderInventoryTab() {
     return (
       <View className="gap-3">
-        {dashboardData.supplies.map(supply => {
+        {dashboard.supplies.map(supply => {
           const { localQty, peerQty } = splitLocalPeerQuantities(
             supply.quantity,
             supply.inventoryItemId,
@@ -928,12 +1266,12 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
           <Text className="text-[11px] font-semibold uppercase tracking-wider text-[#7A8BAD]">
             Conflicts
           </Text>
-          {dashboardData.conflicts.length === 0 ? (
+          {dashboard.conflicts.length === 0 ? (
             <View className="rounded-xl border border-[#20314D] bg-[#182438] px-4 py-3">
               <Text className="text-[13px] text-[#8FA0BC]">None</Text>
             </View>
           ) : (
-            dashboardData.conflicts.map(conflict => {
+            dashboard.conflicts.map(conflict => {
               const expanded = expandedConflictId === conflict.conflictId;
 
               return (
@@ -968,7 +1306,7 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
                             Local
                           </Text>
                           <Text className="mt-1 font-mono text-[11px] text-[#DCE4F5]">
-                            {conflict.fieldName} pending
+                            {conflict.localValueText ?? 'No local snapshot'}
                           </Text>
                         </View>
                         <View className="flex-1 rounded-lg bg-[#0A1220] p-3">
@@ -976,7 +1314,7 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
                             Peer
                           </Text>
                           <Text className="mt-1 font-mono text-[11px] text-[#DCE4F5]">
-                            {conflict.fieldName} pending
+                            {conflict.remoteValueText ?? 'No peer snapshot'}
                           </Text>
                         </View>
                       </View>
@@ -990,7 +1328,61 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
                         <Text className="text-[11px] text-[#7BC9A8]">
                           Resolved {conflict.resolvedAtMs}
                         </Text>
-                      ) : null}
+                      ) : (
+                        <View className="mt-1 flex-row flex-wrap gap-2">
+                          <Pressable
+                            accessibilityRole="button"
+                            accessibilityLabel={`Resolve ${conflict.conflictId} with local value`}
+                            disabled={resolvingConflictId === conflict.conflictId}
+                            onPress={() =>
+                              handleResolveConflict(conflict.conflictId, 'local')
+                            }
+                            className={`rounded-md bg-[#2A3D5D] px-3 py-2 ${
+                              resolvingConflictId === conflict.conflictId
+                                ? 'opacity-60'
+                                : ''
+                            }`}
+                          >
+                            <Text className="text-[11px] font-medium text-[#DFE8FA]">
+                              Keep local
+                            </Text>
+                          </Pressable>
+                          <Pressable
+                            accessibilityRole="button"
+                            accessibilityLabel={`Resolve ${conflict.conflictId} with peer value`}
+                            disabled={resolvingConflictId === conflict.conflictId}
+                            onPress={() =>
+                              handleResolveConflict(conflict.conflictId, 'remote')
+                            }
+                            className={`rounded-md bg-[#244760] px-3 py-2 ${
+                              resolvingConflictId === conflict.conflictId
+                                ? 'opacity-60'
+                                : ''
+                            }`}
+                          >
+                            <Text className="text-[11px] font-medium text-[#D8F2FF]">
+                              Apply peer
+                            </Text>
+                          </Pressable>
+                          <Pressable
+                            accessibilityRole="button"
+                            accessibilityLabel={`Resolve ${conflict.conflictId} by merge`}
+                            disabled={resolvingConflictId === conflict.conflictId}
+                            onPress={() =>
+                              handleResolveConflict(conflict.conflictId, 'merged')
+                            }
+                            className={`rounded-md bg-[#3A4D2A] px-3 py-2 ${
+                              resolvingConflictId === conflict.conflictId
+                                ? 'opacity-60'
+                                : ''
+                            }`}
+                          >
+                            <Text className="text-[11px] font-medium text-[#E0F2D8]">
+                              Merge
+                            </Text>
+                          </Pressable>
+                        </View>
+                      )}
                     </View>
                   ) : null}
                 </View>
@@ -1065,7 +1457,7 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
 
   function renderMeshTab() {
     const meshRole =
-      dashboardData.sync.peerCount > 0 ? 'Relay-capable' : 'Client';
+      dashboard.sync.peerCount > 0 ? 'Relay-capable' : 'Client';
 
     return (
       <View className="gap-3">
@@ -1085,16 +1477,16 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
           <View className="mt-3 gap-2">
             <MeshRow
               label="Link"
-              value={formatConnectivityLabel(dashboardData.connectivityState)}
+              value={formatConnectivityLabel(dashboard.connectivityState)}
             />
-            <MeshRow label="Peers" value={String(dashboardData.sync.peerCount)} />
+            <MeshRow label="Peers" value={String(dashboard.sync.peerCount)} />
             <MeshRow
               label="Queued"
-              value={String(dashboardData.sync.queuedEnvelopeCount)}
+              value={String(dashboard.sync.queuedEnvelopeCount)}
             />
             <MeshRow
               label="In flight"
-              value={String(dashboardData.sync.inFlightEnvelopeCount)}
+              value={String(dashboard.sync.inFlightEnvelopeCount)}
             />
           </View>
         </View>
@@ -1110,10 +1502,74 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
           />
         </View>
 
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Run delta sync cycle"
+          disabled={syncingMesh || !activeSession}
+          onPress={() =>
+            handleRunMeshSync({ injectConcurrentPeerMutation: false })
+          }
+          className={`min-h-[48px] items-center justify-center rounded-lg bg-[#BFD0F7] px-4 ${
+            syncingMesh || !activeSession ? 'opacity-60' : ''
+          }`}
+        >
+          <Text className="text-[14px] font-semibold text-[#102950]">
+            {syncingMesh ? 'Syncing…' : 'Run delta sync'}
+          </Text>
+        </Pressable>
+
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Run concurrent merge sync cycle"
+          disabled={syncingMesh || !activeSession}
+          onPress={() =>
+            handleRunMeshSync({ injectConcurrentPeerMutation: true })
+          }
+          className={`min-h-[44px] items-center justify-center rounded-lg bg-[#2A3D5D] px-4 ${
+            syncingMesh || !activeSession ? 'opacity-60' : ''
+          }`}
+        >
+          <Text className="text-[13px] font-medium text-[#DFE8FA]">
+            Concurrent merge demo
+          </Text>
+        </Pressable>
+
+        {lastSyncCycle ? (
+          <View className="rounded-xl border border-[#213350] bg-[#212C40] p-4">
+            <Text className="text-[11px] font-semibold uppercase tracking-wider text-[#7A8BAD]">
+              Last cycle
+            </Text>
+            <View className="mt-2 gap-1">
+              <MeshRow label="Peer" value={lastSyncCycle.peerDeviceId} />
+              <MeshRow label="Transport" value={lastSyncCycle.transport} />
+              <MeshRow
+                label="Transport sent"
+                value={lastSyncCycle.transportSent ? 'yes' : 'no'}
+              />
+              <MeshRow
+                label="Exported"
+                value={String(lastSyncCycle.exportedEventCount)}
+              />
+              <MeshRow
+                label="Imported"
+                value={String(lastSyncCycle.importedEventCount)}
+              />
+              <MeshRow
+                label="Conflicts"
+                value={String(lastSyncCycle.conflictsDetected)}
+              />
+              <MeshRow
+                label="Envelope"
+                value={`${lastSyncCycle.envelopeSizeBytes} B`}
+              />
+            </View>
+          </View>
+        ) : null}
+
         <Text className="text-[11px] font-semibold uppercase tracking-wider text-[#7A8BAD]">
           Peers
         </Text>
-        {dashboardData.nodeHealth.map(node => (
+        {dashboard.nodeHealth.map(node => (
           <View
             key={node.vehicleId}
             className="rounded-xl border border-[#213350] bg-[#212C40] p-4"
@@ -1242,7 +1698,7 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
         </Text>
         <View className="rounded-md border border-[#20314C] bg-[#111C2D] px-2 py-1">
           <Text className="text-[11px] font-medium text-[#C8D5EF]">
-            {formatConnectivityLabel(dashboardData.connectivityState)}
+            {formatConnectivityLabel(dashboard.connectivityState)}
           </Text>
         </View>
       </View>
@@ -1262,6 +1718,46 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
         <Text className="mt-1 text-[13px] leading-5 text-[#E7ECF8]">
           {authNotice?.message}
         </Text>
+      </View>
+    );
+  }
+
+  function renderLiveNotifications() {
+    return (
+      <View className="rounded-xl border border-[#20304A] bg-[#0D1627] p-3">
+        <View className="flex-row items-center justify-between">
+          <Text className="text-[11px] font-semibold uppercase tracking-wider text-[#7A8BAD]">
+            Real-time notifications
+          </Text>
+          <Text className="text-[11px] text-[#6B7A92]">
+            {liveNotifications.length}
+          </Text>
+        </View>
+
+        <ScrollView className="mt-2 max-h-[180px]" nestedScrollEnabled>
+          {liveNotifications.length === 0 ? (
+            <Text className="text-[12px] text-[#6B7A92]">
+              Waiting for auth and sync events.
+            </Text>
+          ) : (
+            liveNotifications.map(notification => (
+              <View
+                key={notification.id}
+                className={`mb-2 rounded-lg border px-3 py-2 ${buildNoticeClassName(notification.tone)}`}
+              >
+                <Text className="text-[13px] font-medium text-white">
+                  {notification.title}
+                </Text>
+                <Text className="mt-1 text-[12px] text-[#E7ECF8]">
+                  {notification.message}
+                </Text>
+                <Text className="mt-1 text-[10px] text-[#C5CFDF]">
+                  {formatZuluTimestamp(notification.occurredAtMs)}
+                </Text>
+              </View>
+            ))
+          )}
+        </ScrollView>
       </View>
     );
   }
@@ -1386,10 +1882,10 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
     };
     const network = {
       id: 'network',
-      title: `Queue ${dashboardData.sync.queuedEnvelopeCount}`,
-      subtitle: `${dashboardData.sync.peerCount} peers`,
+      title: `Queue ${dashboard.sync.queuedEnvelopeCount}`,
+      subtitle: `${dashboard.sync.peerCount} peers`,
       trailingLabel:
-        dashboardData.connectivityState === 'offline' ? 'Offline' : 'Live',
+        dashboard.connectivityState === 'offline' ? 'Offline' : 'Live',
       accentClassName: 'bg-[#3F4C63]',
     };
 

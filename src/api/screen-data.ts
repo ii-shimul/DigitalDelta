@@ -1,5 +1,15 @@
 import type { Scalar as SQLiteScalar } from '@op-engineering/op-sqlite';
 
+import {
+  createSQLiteAuthService,
+  createSQLiteLedgerService,
+  encodeUtf8,
+  tickVectorClock,
+  type AppRole,
+  type ConflictResolutionChoice,
+  type LedgerEntityKind,
+} from '../core';
+
 import { getDatabase } from '../db';
 
 import type {
@@ -17,6 +27,16 @@ import type {
 type LoginScreenQueryInput = {
   userId?: string;
   deviceId?: string;
+};
+
+export type ResolveDashboardConflictInput = {
+  conflictId: string;
+  resolution: ConflictResolutionChoice;
+  actor: {
+    userId: string;
+    deviceId: string;
+    role: AppRole;
+  };
 };
 
 type Scalar = SQLiteScalar | undefined;
@@ -111,6 +131,16 @@ export async function getDashboardScreenData(): Promise<DashboardScreenData> {
     entityType: asString(row.entityType),
     entityId: asString(row.entityId),
     fieldName: asString(row.fieldName),
+    localValueText: deriveConflictValueText({
+      side: 'local',
+      valueBlob: asBlob(row.localValueBlob),
+      metadata: parseJsonRecord(row.metadataJson),
+    }),
+    remoteValueText: deriveConflictValueText({
+      side: 'remote',
+      valueBlob: asBlob(row.remoteValueBlob),
+      metadata: parseJsonRecord(row.metadataJson),
+    }),
     resolutionText: asOptionalString(row.resolutionText),
     createdAtMs: asNumber(row.createdAtMs),
     resolvedAtMs: asOptionalNumber(row.resolvedAtMs),
@@ -132,6 +162,126 @@ export async function getDashboardScreenData(): Promise<DashboardScreenData> {
     triageAlerts,
     conflicts,
     sync,
+  };
+}
+
+export async function resolveDashboardConflict(
+  input: ResolveDashboardConflictInput,
+): Promise<{ resolutionEventId: string; resolvedAtMs: number }> {
+  const db = await getDatabase();
+  const conflictResult = await db.execute(
+    `
+      SELECT
+        conflict_id AS conflictId,
+        entity_type AS entityType,
+        entity_id AS entityId,
+        field_name AS fieldName,
+        metadata_json AS metadataJson,
+        local_value_blob AS localValueBlob,
+        remote_value_blob AS remoteValueBlob
+      FROM conflicts
+      WHERE conflict_id = ?
+      LIMIT 1
+    `,
+    [input.conflictId],
+  );
+  const conflictRow = conflictResult.rows[0];
+
+  if (!conflictRow) {
+    throw new Error(`Conflict ${input.conflictId} not found.`);
+  }
+
+  const entityType = normalizeLedgerEntityKind(conflictRow.entityType);
+  const authService = createSQLiteAuthService();
+  const hasWritePermission = await authService.hasPermission({
+    actor: {
+      userId: input.actor.userId,
+      deviceId: input.actor.deviceId,
+      role: input.actor.role,
+    },
+    resource: entityType,
+    action: 'write',
+  });
+
+  if (!hasWritePermission) {
+    throw new Error(
+      `Role ${input.actor.role} is not permitted to resolve ${entityType} conflicts.`,
+    );
+  }
+
+  const resolvedAtMs = Date.now();
+  const resolutionEventId = createResolutionEventId();
+  const metadata = parseJsonRecord(conflictRow.metadataJson);
+
+  await db.execute(
+    `
+      UPDATE conflicts
+      SET
+        resolution_text = ?,
+        resolution_event_id = ?,
+        resolved_at_ms = ?,
+        metadata_json = ?
+      WHERE conflict_id = ?
+    `,
+    [
+      buildResolutionText(input.resolution),
+      resolutionEventId,
+      resolvedAtMs,
+      JSON.stringify({
+        ...metadata,
+        resolutionChoice: input.resolution,
+        resolvedByUserId: input.actor.userId,
+        resolvedByDeviceId: input.actor.deviceId,
+        resolvedByRole: input.actor.role,
+      }),
+      input.conflictId,
+    ],
+  );
+
+  const ledgerService = createSQLiteLedgerService(async () => db);
+  const previousClock = await ledgerService.getLatestVectorClockForDevice(
+    input.actor.deviceId,
+  );
+
+  await ledgerService.appendEvent({
+    eventId: resolutionEventId,
+    entityType,
+    entityId: asString(conflictRow.entityId),
+    eventType: 'conflict_resolved',
+    actor: {
+      userId: input.actor.userId,
+      deviceId: input.actor.deviceId,
+      role: input.actor.role,
+    },
+    occurredAtMs: resolvedAtMs,
+    vectorClock: tickVectorClock(previousClock, input.actor.deviceId),
+    payloadType: 'digitaldelta.v1.conflict.resolution',
+    payloadBlob: encodeUtf8(
+      JSON.stringify({
+        conflictId: input.conflictId,
+        fieldName: asString(conflictRow.fieldName),
+        resolution: input.resolution,
+      }),
+    ),
+    metadata: {
+      conflictId: input.conflictId,
+      resolution: input.resolution,
+      localValue: deriveConflictValueText({
+        side: 'local',
+        valueBlob: asBlob(conflictRow.localValueBlob),
+        metadata,
+      }),
+      remoteValue: deriveConflictValueText({
+        side: 'remote',
+        valueBlob: asBlob(conflictRow.remoteValueBlob),
+        metadata,
+      }),
+    },
+  });
+
+  return {
+    resolutionEventId,
+    resolvedAtMs,
   };
 }
 
@@ -330,12 +480,145 @@ const dashboardConflictsQuery = `
     entity_type AS entityType,
     entity_id AS entityId,
     field_name AS fieldName,
+    local_value_blob AS localValueBlob,
+    remote_value_blob AS remoteValueBlob,
+    metadata_json AS metadataJson,
     resolution_text AS resolutionText,
     created_at_ms AS createdAtMs,
     resolved_at_ms AS resolvedAtMs
   FROM conflicts
   ORDER BY created_at_ms DESC
 `;
+
+function deriveConflictValueText(input: {
+  side: 'local' | 'remote';
+  valueBlob?: Uint8Array;
+  metadata: Record<string, unknown>;
+}): string | undefined {
+  const preferredKeys =
+    input.side === 'local'
+      ? ['localValue', 'localQuantity', 'local_value']
+      : ['remoteValue', 'remoteQuantity', 'remote_value'];
+
+  for (const key of preferredKeys) {
+    if (!(key in input.metadata)) {
+      continue;
+    }
+
+    const formatted = formatConflictValue(input.metadata[key]);
+    if (formatted) {
+      return formatted;
+    }
+  }
+
+  return decodeConflictBlob(input.valueBlob);
+}
+
+function formatConflictValue(value: unknown): string | undefined {
+  if (typeof value === 'string' && value.trim().length > 0) {
+    return value;
+  }
+
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+
+  if (value && typeof value === 'object') {
+    return JSON.stringify(value);
+  }
+
+  return undefined;
+}
+
+function decodeConflictBlob(valueBlob?: Uint8Array): string | undefined {
+  if (!valueBlob || valueBlob.length === 0) {
+    return undefined;
+  }
+
+  const asciiText = Array.from(valueBlob)
+    .map(byte =>
+      byte >= 32 && byte <= 126 ? String.fromCharCode(byte) : ' ',
+    )
+    .join('')
+    .trim();
+
+  if (asciiText.length > 0) {
+    return asciiText;
+  }
+
+  const hex = Array.from(valueBlob)
+    .slice(0, 12)
+    .map(byte => byte.toString(16).padStart(2, '0'))
+    .join('');
+  return `0x${hex}${valueBlob.length > 12 ? '…' : ''}`;
+}
+
+function createResolutionEventId(): string {
+  return `evt-cnf-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function buildResolutionText(resolution: ConflictResolutionChoice): string {
+  switch (resolution) {
+    case 'local':
+      return 'Applied local value after operator review.';
+    case 'remote':
+      return 'Applied peer value after operator review.';
+    case 'merged':
+      return 'Merged local and peer values and committed decision.';
+    case 'manual':
+    default:
+      return 'Applied manual override after conflict review.';
+  }
+}
+
+function normalizeLedgerEntityKind(value: Scalar): LedgerEntityKind {
+  const entityType = asString(value);
+  const allowedTypes = new Set<LedgerEntityKind>([
+    'auth_session',
+    'device',
+    'user',
+    'supply_item',
+    'delivery',
+    'route',
+    'receipt',
+    'handoff',
+    'triage_decision',
+    'edge_status',
+  ]);
+
+  return allowedTypes.has(entityType as LedgerEntityKind)
+    ? (entityType as LedgerEntityKind)
+    : 'supply_item';
+}
+
+function asBlob(value: Scalar): Uint8Array | undefined {
+  if (value instanceof Uint8Array) {
+    return new Uint8Array(value);
+  }
+
+  if (value instanceof ArrayBuffer) {
+    return new Uint8Array(value);
+  }
+
+  return undefined;
+}
+
+function parseJsonRecord(value: Scalar): Record<string, unknown> {
+  if (typeof value !== 'string' || value.length === 0) {
+    return {};
+  }
+
+  try {
+    const parsedValue = JSON.parse(value) as unknown;
+    if (!parsedValue || typeof parsedValue !== 'object' || Array.isArray(parsedValue)) {
+      return {};
+    }
+
+    return parsedValue as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
 
 const dashboardSyncSummaryQuery = `
   SELECT
