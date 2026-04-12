@@ -10,7 +10,13 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { requestOtp, verifyOtp } from '../../api/auth';
+import {
+  requestOtp,
+  verifyOtp,
+  getSecurityQuestion,
+  verifySecurityAnswer,
+  createAppSession,
+} from '../../api/auth';
 import type { RegisteredUser } from '../../api/auth';
 import type { IssuedOfflineOtpRecord } from '../../core/contracts';
 
@@ -25,14 +31,17 @@ const ROLE_LABELS: Record<string, string> = {
 type Props = {
   user: RegisteredUser;
   onLoggedIn: () => void;
-  onSwitchToRegister: () => void;
 };
 
-export default function LoginScreen({
-  user,
-  onLoggedIn,
-  onSwitchToRegister,
-}: Props) {
+export default function LoginScreen({ user, onLoggedIn }: Props) {
+  // Security question gate
+  const [securityQuestion, setSecurityQuestion] = useState<string | null>(null);
+  const [securityAnswerInput, setSecurityAnswerInput] = useState('');
+  const [securityVerified, setSecurityVerified] = useState(false);
+  const [securityError, setSecurityError] = useState<string | null>(null);
+  const [checkingAnswer, setCheckingAnswer] = useState(false);
+
+  // OTP state
   const [otpSession, setOtpSession] = useState<IssuedOfflineOtpRecord | null>(
     null,
   );
@@ -44,6 +53,35 @@ export default function LoginScreen({
   const inputRefs = useRef<(TextInput | null)[]>([]);
 
   const otpCode = otpDigits.join('');
+
+  // Load security question on mount
+  useEffect(() => {
+    getSecurityQuestion(user.userId).then(q => setSecurityQuestion(q));
+  }, [user.userId]);
+
+  const handleVerifySecurityAnswer = useCallback(async () => {
+    if (!securityAnswerInput.trim()) {
+      return;
+    }
+    setCheckingAnswer(true);
+    setSecurityError(null);
+    try {
+      const ok = await verifySecurityAnswer(
+        user.userId,
+        securityAnswerInput.trim(),
+      );
+      if (ok) {
+        setSecurityVerified(true);
+      } else {
+        setSecurityError('Incorrect answer. Please try again.');
+        setSecurityAnswerInput('');
+      }
+    } catch (e) {
+      setSecurityError(e instanceof Error ? e.message : 'Verification failed');
+    } finally {
+      setCheckingAnswer(false);
+    }
+  }, [user.userId, securityAnswerInput]);
 
   // Countdown timer for OTP expiry
   useEffect(() => {
@@ -130,6 +168,7 @@ export default function LoginScreen({
     try {
       const result = await verifyOtp(otpSession.otpSessionId, otpCode);
       if (result.verified) {
+        await createAppSession(user);
         onLoggedIn();
       } else {
         setError(
@@ -183,8 +222,50 @@ export default function LoginScreen({
           </View>
         </View>
 
-        {/* OTP Section */}
-        {!otpSession ? (
+        {/* Security Question Gate */}
+        {!securityVerified ? (
+          <View style={styles.securitySection}>
+            {securityQuestion ? (
+              <>
+                <Text style={styles.securityLabel}>Security Verification</Text>
+                <Text style={styles.securityQuestion}>{securityQuestion}</Text>
+                <TextInput
+                  style={styles.textInput}
+                  placeholder="Enter your answer"
+                  placeholderTextColor="#9da3b0"
+                  value={securityAnswerInput}
+                  onChangeText={setSecurityAnswerInput}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  editable={!checkingAnswer}
+                />
+                {securityError ? (
+                  <View style={styles.errorCard}>
+                    <Text style={styles.errorText}>{securityError}</Text>
+                  </View>
+                ) : null}
+                <TouchableOpacity
+                  style={[
+                    styles.button,
+                    (!securityAnswerInput.trim() || checkingAnswer) &&
+                      styles.buttonDisabled,
+                  ]}
+                  onPress={handleVerifySecurityAnswer}
+                  activeOpacity={0.8}
+                  disabled={!securityAnswerInput.trim() || checkingAnswer}
+                >
+                  <Text style={styles.buttonText}>
+                    {checkingAnswer ? 'Verifying...' : 'Verify Answer'}
+                  </Text>
+                </TouchableOpacity>
+              </>
+            ) : (
+              <Text style={styles.otpPromptText}>
+                Loading security question...
+              </Text>
+            )}
+          </View>
+        ) : !otpSession ? (
           <View style={styles.otpPrompt}>
             <Text style={styles.otpPromptText}>
               Generate a time-based one-time password to verify your identity.
@@ -288,15 +369,6 @@ export default function LoginScreen({
             <Text style={styles.errorText}>{error}</Text>
           </View>
         ) : null}
-
-        {/* Switch account */}
-        <TouchableOpacity
-          style={styles.switchLink}
-          onPress={onSwitchToRegister}
-          activeOpacity={0.7}
-        >
-          <Text style={styles.switchText}>Register a new identity</Text>
-        </TouchableOpacity>
       </ScrollView>
     </SafeAreaView>
   );
@@ -498,13 +570,29 @@ const styles = StyleSheet.create({
     color: '#93000a',
     fontWeight: '600',
   },
-  switchLink: {
-    paddingVertical: 16,
-    alignItems: 'center',
+  securitySection: {
+    gap: 14,
+    marginBottom: 20,
   },
-  switchText: {
-    fontSize: 14,
-    color: '#565e74',
-    textDecorationLine: 'underline',
+  securityLabel: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#131b2e',
+  },
+  securityQuestion: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#0058be',
+    lineHeight: 22,
+  },
+  textInput: {
+    backgroundColor: '#f2f3ff',
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    fontSize: 16,
+    color: '#131b2e',
+    borderWidth: 1,
+    borderColor: '#c2c6d6',
   },
 });

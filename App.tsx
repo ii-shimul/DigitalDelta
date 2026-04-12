@@ -9,7 +9,12 @@ import {
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { getDatabase } from './src/db';
-import { getRegisteredUser, type RegisteredUser } from './src/api/auth';
+import {
+  getRegisteredUser,
+  getActiveSession,
+  clearActiveSession,
+  type RegisteredUser,
+} from './src/api/auth';
 import RegisterScreen from './src/ui/screens/register-screen';
 import LoginScreen from './src/ui/screens/login-screen';
 import HomeScreen from './src/ui/screens/home-screen';
@@ -36,6 +41,20 @@ function AppContent() {
     (async () => {
       try {
         await getDatabase();
+
+        // Check for existing active session first
+        const session = await getActiveSession();
+        if (!active) {
+          return;
+        }
+
+        if (session) {
+          setUser(session);
+          setScreen('home');
+          return;
+        }
+
+        // No session — check if registered
         const registered = await getRegisteredUser();
 
         if (!active) {
@@ -72,12 +91,9 @@ function AppContent() {
     setScreen('home');
   }, []);
 
-  const handleLogout = useCallback(() => {
+  const handleLogout = useCallback(async () => {
+    await clearActiveSession();
     setScreen('login');
-  }, []);
-
-  const handleSwitchToRegister = useCallback(() => {
-    setScreen('register');
   }, []);
 
   if (error) {
@@ -103,13 +119,7 @@ function AppContent() {
   }
 
   if (screen === 'login' && user) {
-    return (
-      <LoginScreen
-        user={user}
-        onLoggedIn={handleLoggedIn}
-        onSwitchToRegister={handleSwitchToRegister}
-      />
-    );
+    return <LoginScreen user={user} onLoggedIn={handleLoggedIn} />;
   }
 
   if (screen === 'home' && user) {

@@ -41,6 +41,14 @@ const ROLES: { value: AppRole; label: string; description: string }[] = [
   },
 ];
 
+const SECURITY_QUESTIONS = [
+  'What is the name of your first school?',
+  "What is your mother's maiden name?",
+  'What city were you born in?',
+  'What was the name of your first pet?',
+  'What is your favorite food?',
+];
+
 type Props = {
   onRegistered: (user: RegisteredUser) => void;
 };
@@ -48,13 +56,19 @@ type Props = {
 export default function RegisterScreen({ onRegistered }: Props) {
   const [name, setName] = useState('');
   const [selectedRole, setSelectedRole] = useState<AppRole | null>(null);
+  const [selectedQuestion, setSelectedQuestion] = useState<string | null>(null);
+  const [securityAnswer, setSecurityAnswer] = useState('');
   const [loading, setLoading] = useState(false);
 
   const canSubmit =
-    name.trim().length >= 2 && selectedRole !== null && !loading;
+    name.trim().length >= 2 &&
+    selectedRole !== null &&
+    selectedQuestion !== null &&
+    securityAnswer.trim().length >= 2 &&
+    !loading;
 
   const handleRegister = async () => {
-    if (!canSubmit || !selectedRole) {
+    if (!canSubmit || !selectedRole || !selectedQuestion) {
       return;
     }
 
@@ -63,6 +77,8 @@ export default function RegisterScreen({ onRegistered }: Props) {
       const user = await registerUser({
         displayName: name.trim(),
         role: selectedRole,
+        securityQuestion: selectedQuestion,
+        securityAnswer: securityAnswer.trim(),
       });
       onRegistered(user);
     } catch (error) {
@@ -148,6 +164,57 @@ export default function RegisterScreen({ onRegistered }: Props) {
             })}
           </View>
         </View>
+
+        {/* Security Question */}
+        <View style={styles.section}>
+          <Text style={styles.label}>Security Question</Text>
+          <Text style={styles.hint}>
+            Choose a question you'll answer to verify your identity at login
+          </Text>
+          <View style={styles.roleList}>
+            {SECURITY_QUESTIONS.map(q => {
+              const isSelected = selectedQuestion === q;
+              return (
+                <TouchableOpacity
+                  key={q}
+                  style={[
+                    styles.roleCard,
+                    isSelected && styles.roleCardSelected,
+                  ]}
+                  onPress={() => setSelectedQuestion(q)}
+                  activeOpacity={0.7}
+                  disabled={loading}
+                >
+                  <Text
+                    style={[
+                      styles.roleLabel,
+                      isSelected && styles.roleLabelSelected,
+                    ]}
+                  >
+                    {q}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        </View>
+
+        {/* Security Answer */}
+        {selectedQuestion && (
+          <View style={styles.section}>
+            <Text style={styles.label}>Your Answer</Text>
+            <TextInput
+              style={styles.textInput}
+              placeholder="Enter your answer"
+              placeholderTextColor="#9da3b0"
+              value={securityAnswer}
+              onChangeText={setSecurityAnswer}
+              autoCapitalize="none"
+              autoCorrect={false}
+              editable={!loading}
+            />
+          </View>
+        )}
 
         {/* Security Info */}
         <View style={styles.infoCard}>
