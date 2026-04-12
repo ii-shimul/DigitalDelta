@@ -1,0 +1,48 @@
+syntax = "proto3";
+
+package digitaldelta.v1;
+
+option go_package = "github.com/ii-shimul/DigitalDelta/proto/digitaldelta/v1;digitaldeltav1";
+
+import "proto/common.proto";
+import "proto/sync.proto";
+
+enum MeshTransport {
+  MESH_TRANSPORT_UNSPECIFIED = 0;
+  MESH_TRANSPORT_BLUETOOTH_LE = 1;
+  MESH_TRANSPORT_WIFI_DIRECT = 2;
+  MESH_TRANSPORT_CELLULAR = 3;
+}
+
+enum NodeRole {
+  NODE_ROLE_UNSPECIFIED = 0;
+  NODE_ROLE_CLIENT = 1;
+  NODE_ROLE_RELAY = 2;
+  NODE_ROLE_DUAL = 3;
+}
+
+message MeshRelayMetadata {
+  string message_id = 1;
+  string origin_device_id = 2;
+  string relay_device_id = 3;
+  string destination_device_id = 4;
+  MeshTransport transport = 5;
+  NodeRole sender_role = 6;
+  uint32 ttl_hops = 7;
+  uint32 hop_count = 8;
+  string dedup_key = 9;
+  uint64 created_at_ms = 10;
+  uint64 expires_at_ms = 11;
+  bool requires_ack = 12;
+  uint32 sender_battery_percent = 13;
+  sint32 signal_strength_dbm = 14;
+}
+
+message MeshPacket {
+  MeshRelayMetadata relay = 1;
+
+  oneof payload {
+    SyncEnvelope sync_envelope = 2;
+    EncryptedEnvelope encrypted_envelope = 3;
+  }
+}

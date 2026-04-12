@@ -1,0 +1,83 @@
+syntax = "proto3";
+
+package digitaldelta.v1;
+
+option go_package = "github.com/ii-shimul/DigitalDelta/proto/digitaldelta/v1;digitaldeltav1";
+
+enum RouteEdgeType {
+  ROUTE_EDGE_TYPE_UNSPECIFIED = 0;
+  ROUTE_EDGE_TYPE_ROAD = 1;
+  ROUTE_EDGE_TYPE_WATERWAY = 2;
+  ROUTE_EDGE_TYPE_AIRWAY = 3;
+}
+
+enum RouteEdgeStatus {
+  ROUTE_EDGE_STATUS_UNSPECIFIED = 0;
+  ROUTE_EDGE_STATUS_OPEN = 1;
+  ROUTE_EDGE_STATUS_DEGRADED = 2;
+  ROUTE_EDGE_STATUS_WASHED_OUT = 3;
+  ROUTE_EDGE_STATUS_IMPASSABLE = 4;
+  ROUTE_EDGE_STATUS_HIGH_RISK = 5;
+}
+
+enum VehicleType {
+  VEHICLE_TYPE_UNSPECIFIED = 0;
+  VEHICLE_TYPE_TRUCK = 1;
+  VEHICLE_TYPE_SPEEDBOAT = 2;
+  VEHICLE_TYPE_DRONE = 3;
+}
+
+enum RouteUpdateReason {
+  ROUTE_UPDATE_REASON_UNSPECIFIED = 0;
+  ROUTE_UPDATE_REASON_MANUAL_OVERRIDE = 1;
+  ROUTE_UPDATE_REASON_EDGE_STATUS_CHANGED = 2;
+  ROUTE_UPDATE_REASON_PREDICTED_DECAY = 3;
+  ROUTE_UPDATE_REASON_HANDOFF_REQUIRED = 4;
+  ROUTE_UPDATE_REASON_SLA_PREEMPTION = 5;
+}
+
+message EdgeState {
+  string edge_id = 1;
+  string source_node_id = 2;
+  string target_node_id = 3;
+  RouteEdgeType edge_type = 4;
+  RouteEdgeStatus status = 5;
+  uint32 travel_time_minutes = 6;
+  uint32 capacity_units = 7;
+  float risk_score = 8;
+}
+
+message RouteLeg {
+  string edge_id = 1;
+  string source_node_id = 2;
+  string target_node_id = 3;
+  RouteEdgeType edge_type = 4;
+  VehicleType vehicle_type = 5;
+  uint32 eta_minutes = 6;
+  float risk_score = 7;
+}
+
+message RoutePlan {
+  string route_id = 1;
+  string delivery_id = 2;
+  string vehicle_id = 3;
+  VehicleType vehicle_type = 4;
+  repeated RouteLeg legs = 5;
+  uint32 total_eta_minutes = 6;
+  float total_risk_score = 7;
+  repeated string blocked_edge_ids = 8;
+  repeated string handoff_node_ids = 9;
+}
+
+message RouteUpdate {
+  string route_update_id = 1;
+  string route_id = 2;
+  string delivery_id = 3;
+  RouteUpdateReason reason = 4;
+  EdgeState changed_edge = 5;
+  RoutePlan next_plan = 6;
+  repeated string affected_delivery_ids = 7;
+  uint64 computed_at_ms = 8;
+  float predicted_failure_probability = 9;
+  bool requires_handoff = 10;
+}

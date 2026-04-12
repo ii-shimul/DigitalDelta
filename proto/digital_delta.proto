@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package digitaldelta.v1;
+
+option go_package = "github.com/ii-shimul/DigitalDelta/proto/digitaldelta/v1;digitaldeltav1";
+
+import "proto/common.proto";
+import "proto/identity.proto";
+import "proto/auth.proto";
+import "proto/routing.proto";
+import "proto/triage.proto";
+import "proto/pod.proto";
+import "proto/fleet.proto";
+import "proto/ledger.proto";
+import "proto/sync.proto";
+import "proto/mesh.proto";

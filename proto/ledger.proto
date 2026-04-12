@@ -1,0 +1,80 @@
+syntax = "proto3";
+
+package digitaldelta.v1;
+
+option go_package = "github.com/ii-shimul/DigitalDelta/proto/digitaldelta/v1;digitaldeltav1";
+
+import "proto/auth.proto";
+import "proto/common.proto";
+import "proto/fleet.proto";
+import "proto/identity.proto";
+import "proto/pod.proto";
+import "proto/routing.proto";
+import "proto/triage.proto";
+
+enum LedgerEntityType {
+  LEDGER_ENTITY_TYPE_UNSPECIFIED = 0;
+  LEDGER_ENTITY_TYPE_DEVICE = 1;
+  LEDGER_ENTITY_TYPE_USER = 2;
+  LEDGER_ENTITY_TYPE_SUPPLY_ITEM = 3;
+  LEDGER_ENTITY_TYPE_DELIVERY = 4;
+  LEDGER_ENTITY_TYPE_ROUTE = 5;
+  LEDGER_ENTITY_TYPE_RECEIPT = 6;
+  LEDGER_ENTITY_TYPE_HANDOFF = 7;
+  LEDGER_ENTITY_TYPE_TRIAGE_DECISION = 8;
+  LEDGER_ENTITY_TYPE_EDGE_STATUS = 9;
+}
+
+enum LedgerEventType {
+  LEDGER_EVENT_TYPE_UNSPECIFIED = 0;
+  LEDGER_EVENT_TYPE_AUTH = 1;
+  LEDGER_EVENT_TYPE_INVENTORY_MUTATION = 2;
+  LEDGER_EVENT_TYPE_CONFLICT_DETECTED = 3;
+  LEDGER_EVENT_TYPE_CONFLICT_RESOLVED = 4;
+  LEDGER_EVENT_TYPE_ROUTE_UPDATED = 5;
+  LEDGER_EVENT_TYPE_POD_RECEIPT = 6;
+  LEDGER_EVENT_TYPE_HANDOFF = 7;
+  LEDGER_EVENT_TYPE_TRIAGE_DECISION = 8;
+  LEDGER_EVENT_TYPE_MESH_ROLE_CHANGED = 9;
+  LEDGER_EVENT_TYPE_EDGE_RISK_UPDATED = 10;
+}
+
+enum ConflictType {
+  CONFLICT_TYPE_UNSPECIFIED = 0;
+  CONFLICT_TYPE_CONCURRENT_FIELD_UPDATE = 1;
+  CONFLICT_TYPE_VECTOR_CLOCK_DIVERGENCE = 2;
+  CONFLICT_TYPE_REPLAY_REJECTED = 3;
+}
+
+message ConflictRecord {
+  string conflict_id = 1;
+  ConflictType type = 2;
+  LedgerEntityType entity_type = 3;
+  string entity_id = 4;
+  string field_name = 5;
+  bytes local_value = 6;
+  bytes remote_value = 7;
+  string resolution = 8;
+}
+
+message LedgerEvent {
+  string event_id = 1;
+  LedgerEntityType entity_type = 2;
+  string entity_id = 3;
+  LedgerEventType event_type = 4;
+  ActorRef actor = 5;
+  uint64 occurred_at_ms = 6;
+  VectorClock vector_clock = 7;
+  HashChain audit_chain = 8;
+
+  oneof payload {
+    AuthEvent auth_event = 9;
+    RouteUpdate route_update = 10;
+    PodReceipt pod_receipt = 11;
+    HandoffEvent handoff_event = 12;
+    TriageDecision triage_decision = 13;
+    ConflictRecord conflict_record = 14;
+    DeviceIdentity device_identity = 15;
+    EdgeState edge_state = 16;
+  }
+}

@@ -1,0 +1,52 @@
+syntax = "proto3";
+
+package digitaldelta.v1;
+
+option go_package = "github.com/ii-shimul/DigitalDelta/proto/digitaldelta/v1;digitaldeltav1";
+
+enum SignatureAlgorithm {
+  SIGNATURE_ALGORITHM_UNSPECIFIED = 0;
+  SIGNATURE_ALGORITHM_RSA_SHA256 = 1;
+  SIGNATURE_ALGORITHM_ED25519 = 2;
+}
+
+enum SymmetricEncryptionAlgorithm {
+  SYMMETRIC_ENCRYPTION_ALGORITHM_UNSPECIFIED = 0;
+  SYMMETRIC_ENCRYPTION_ALGORITHM_AES_256_GCM = 1;
+}
+
+enum HashAlgorithm {
+  HASH_ALGORITHM_UNSPECIFIED = 0;
+  HASH_ALGORITHM_SHA_256 = 1;
+}
+
+message VectorClock {
+  map<string, uint64> entries = 1;
+}
+
+message GeoPoint {
+  double latitude = 1;
+  double longitude = 2;
+}
+
+message HashChain {
+  HashAlgorithm algorithm = 1;
+  bytes previous_hash = 2;
+  bytes payload_hash = 3;
+  bytes current_hash = 4;
+}
+
+message Signature {
+  SignatureAlgorithm algorithm = 1;
+  bytes signature = 2;
+  string key_id = 3;
+}
+
+message EncryptedEnvelope {
+  SymmetricEncryptionAlgorithm algorithm = 1;
+  string content_type = 2;
+  bytes nonce = 3;
+  bytes ciphertext = 4;
+  bytes auth_tag = 5;
+  string key_id = 6;
+}

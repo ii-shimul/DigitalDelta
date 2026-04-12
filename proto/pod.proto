@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package digitaldelta.v1;
+
+option go_package = "github.com/ii-shimul/DigitalDelta/proto/digitaldelta/v1;digitaldeltav1";
+
+import "proto/common.proto";
+
+enum PodReceiptStatus {
+  POD_RECEIPT_STATUS_UNSPECIFIED = 0;
+  POD_RECEIPT_STATUS_CHALLENGE_CREATED = 1;
+  POD_RECEIPT_STATUS_COUNTERSIGNED = 2;
+  POD_RECEIPT_STATUS_VERIFIED = 3;
+  POD_RECEIPT_STATUS_REJECTED = 4;
+  POD_RECEIPT_STATUS_REPLAY_REJECTED = 5;
+}
+
+message PodChallenge {
+  string challenge_id = 1;
+  string delivery_id = 2;
+  string sender_device_id = 3;
+  string sender_user_id = 4;
+  string sender_public_key_id = 5;
+  bytes payload_hash = 6;
+  bytes nonce = 7;
+  uint64 issued_at_ms = 8;
+  uint64 expires_at_ms = 9;
+  Signature sender_signature = 10;
+}
+
+message PodReceipt {
+  string receipt_id = 1;
+  string delivery_id = 2;
+  PodReceiptStatus status = 3;
+  PodChallenge challenge = 4;
+  string recipient_user_id = 5;
+  string recipient_device_id = 6;
+  Signature recipient_signature = 7;
+  uint64 verified_at_ms = 8;
+  string rejection_code = 9;
+  string rejection_reason = 10;
+}

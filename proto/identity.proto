@@ -1,0 +1,37 @@
+syntax = "proto3";
+
+package digitaldelta.v1;
+
+option go_package = "github.com/ii-shimul/DigitalDelta/proto/digitaldelta/v1;digitaldeltav1";
+
+enum Role {
+  ROLE_UNSPECIFIED = 0;
+  ROLE_FIELD_VOLUNTEER = 1;
+  ROLE_SUPPLY_MANAGER = 2;
+  ROLE_DRONE_OPERATOR = 3;
+  ROLE_CAMP_COMMANDER = 4;
+  ROLE_SYNC_ADMIN = 5;
+}
+
+enum PublicKeyAlgorithm {
+  PUBLIC_KEY_ALGORITHM_UNSPECIFIED = 0;
+  PUBLIC_KEY_ALGORITHM_RSA_2048 = 1;
+  PUBLIC_KEY_ALGORITHM_ED25519 = 2;
+}
+
+message ActorRef {
+  string user_id = 1;
+  string device_id = 2;
+  Role role = 3;
+  string display_name = 4;
+}
+
+message DeviceIdentity {
+  string device_id = 1;
+  string user_id = 2;
+  string public_key_pem = 3;
+  PublicKeyAlgorithm key_algorithm = 4;
+  repeated Role roles = 5;
+  uint64 provisioned_at_ms = 6;
+  string key_fingerprint = 7;
+}
