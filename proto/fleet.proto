@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package digitaldelta.v1;
+
+option go_package = "github.com/ii-shimul/DigitalDelta/proto/digitaldelta/v1;digitaldeltav1";
+
+import "proto/common.proto";
+import "proto/pod.proto";
+import "proto/routing.proto";
+
+enum HandoffStatus {
+  HANDOFF_STATUS_UNSPECIFIED = 0;
+  HANDOFF_STATUS_PROPOSED = 1;
+  HANDOFF_STATUS_RENDEZVOUS_CONFIRMED = 2;
+  HANDOFF_STATUS_TRANSFERRED = 3;
+  HANDOFF_STATUS_ACKNOWLEDGED = 4;
+  HANDOFF_STATUS_FAILED = 5;
+}
+
+message HandoffEvent {
+  string handoff_id = 1;
+  string delivery_id = 2;
+  string source_vehicle_id = 3;
+  VehicleType source_vehicle_type = 4;
+  string target_vehicle_id = 5;
+  VehicleType target_vehicle_type = 6;
+  GeoPoint rendezvous_point = 7;
+  repeated string cargo_ids = 8;
+  PodReceipt receipt = 9;
+  HandoffStatus status = 10;
+  uint64 occurred_at_ms = 11;
+}
