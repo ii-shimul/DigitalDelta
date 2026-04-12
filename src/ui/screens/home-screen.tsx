@@ -17,7 +17,9 @@ import {
   verifyAuditTrail,
 } from '../../api/auth';
 import { InventoryTab } from '../components/inventory-tab';
+import { FleetTab } from '../components/fleet-tab';
 import { MeshTab } from '../components/mesh-tab';
+import { PodTab } from '../components/pod-tab';
 import { RoutingTab } from '../components/routing-tab';
 import { TriageTab } from '../components/triage-tab';
 import type {
@@ -45,7 +47,9 @@ type Tab =
   | 'inventory'
   | 'mesh'
   | 'triage'
-  | 'routing';
+  | 'routing'
+  | 'pod'
+  | 'fleet';
 
 export default function HomeScreen({ user, onLogout }: Props) {
   const [activeTab, setActiveTab] = useState<Tab>('mission');
@@ -134,6 +138,8 @@ export default function HomeScreen({ user, onLogout }: Props) {
         {activeTab === 'mesh' && <MeshTab user={user} />}
         {activeTab === 'triage' && <TriageTab user={user} />}
         {activeTab === 'routing' && <RoutingTab />}
+        {activeTab === 'pod' && <PodTab user={user} />}
+        {activeTab === 'fleet' && <FleetTab user={user} />}
       </ScrollView>
 
       {/* Bottom Nav */}
@@ -172,6 +178,16 @@ export default function HomeScreen({ user, onLogout }: Props) {
           label="Routes"
           active={activeTab === 'routing'}
           onPress={() => setActiveTab('routing')}
+        />
+        <TabButton
+          label="PoD"
+          active={activeTab === 'pod'}
+          onPress={() => setActiveTab('pod')}
+        />
+        <TabButton
+          label="Fleet"
+          active={activeTab === 'fleet'}
+          onPress={() => setActiveTab('fleet')}
         />
       </View>
     </SafeAreaView>
