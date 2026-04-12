@@ -25,6 +25,9 @@ import type {
   DashboardScreenData,
   LoginScreenData,
   MeshRelaySnapshot,
+  PodChallengeEnvelope,
+  PodReceiptData,
+  PodVerificationOutcome,
   MeshRoleCycleResult,
   MeshStoreForwardCycleResult,
   RoutingEdgeOverview,
@@ -35,6 +38,7 @@ import {
   AUTH_ROLES,
   AuthApi,
   MeshApi,
+  PodApi,
   RoutingApi,
   SyncApi,
   getAvailableAuthRoles,
@@ -70,6 +74,7 @@ const authApi = new AuthApi();
 const syncApi = new SyncApi();
 const meshApi = new MeshApi();
 const routingApi = new RoutingApi();
+const podApi = new PodApi();
 
 const MAIN_TAB_ITEMS: Array<{
   label: string;
@@ -106,9 +111,15 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
     'main',
   );
   const [meshThrottleEnabled, setMeshThrottleEnabled] = useState(true);
-  const [scanDemoState, setScanDemoState] = useState<
-    'idle' | 'success' | 'tamper'
-  >('idle');
+  const [podChallengeEnvelope, setPodChallengeEnvelope] =
+    useState<PodChallengeEnvelope | null>(null);
+  const [podVerificationOutcome, setPodVerificationOutcome] =
+    useState<PodVerificationOutcome | null>(null);
+  const [latestPodReceipt, setLatestPodReceipt] =
+    useState<PodReceiptData | null>(null);
+  const [issuingPodChallenge, setIssuingPodChallenge] = useState(false);
+  const [verifyingPodChallenge, setVerifyingPodChallenge] = useState(false);
+  const [replayingPodChallenge, setReplayingPodChallenge] = useState(false);
   const [expandedConflictId, setExpandedConflictId] = useState<string | null>(
     null,
   );
@@ -158,6 +169,8 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
   const dashboard = liveDashboardData;
   const isWideLayout = width >= 768;
   const routeSummary = dashboard.routes[0];
+  const scannerDeliveryId =
+    routeSummary?.deliveryId ?? dashboard.routes[0]?.deliveryId ?? null;
   const activeRouteOverview =
     routingOverview?.routes.find(route => route.routeId === routeSummary?.routeId) ??
     routingOverview?.routes[0];
@@ -295,6 +308,15 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
 
     void refreshMeshSnapshot();
   }, [activeSession, selectedTab]);
+
+  useEffect(() => {
+    if (!activeSession || !scannerDeliveryId) {
+      setLatestPodReceipt(null);
+      return;
+    }
+
+    void refreshLatestPodReceipt(scannerDeliveryId);
+  }, [activeSession, scannerDeliveryId]);
 
   useEffect(() => {
     if (!activeSession) {
@@ -1207,6 +1229,178 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
     }
   }
 
+  async function refreshLatestPodReceipt(deliveryId: string) {
+    if (!activeSession) {
+      return;
+    }
+
+    try {
+      const latestReceipt = await podApi.getLatestReceipt({
+        loginData,
+        session: activeSession,
+        deliveryId,
+      });
+      setLatestPodReceipt(latestReceipt);
+    } catch {
+      // PoD receipt refresh should not block core scanner operations.
+    }
+  }
+
+  async function handleGeneratePodChallenge() {
+    if (!activeSession) {
+      return;
+    }
+
+    if (!scannerDeliveryId) {
+      setAuthNotice({
+        tone: 'warning',
+        title: 'No active delivery',
+        message: 'Select a delivery route before issuing a proof challenge.',
+      });
+      return;
+    }
+
+    setIssuingPodChallenge(true);
+    setAuthNotice(null);
+
+    try {
+      const challenge = await podApi.createSignedChallenge({
+        loginData,
+        session: activeSession,
+        deliveryId: scannerDeliveryId,
+      });
+
+      setPodChallengeEnvelope(challenge);
+      setPodVerificationOutcome({
+        receiptId: challenge.receiptId,
+        challengeId: challenge.challengeId,
+        deliveryId: challenge.deliveryId,
+        state: 'challenge-generated',
+      });
+
+      await Promise.all([
+        refreshLatestPodReceipt(challenge.deliveryId),
+        (async () => {
+          const refreshedDashboard = await getDashboardScreenData();
+          setLiveDashboardData(previousDashboard => {
+            emitRealtimeNotifications(previousDashboard, refreshedDashboard);
+            return refreshedDashboard;
+          });
+        })(),
+      ]);
+
+      setAuthNotice({
+        tone: 'success',
+        title: 'Challenge signed',
+        message: `Challenge ${challenge.challengeId} issued for ${challenge.deliveryId}.`,
+      });
+      pushLiveNotification({
+        tone: 'success',
+        title: 'PoD challenge generated',
+        message: `${challenge.deliveryId} · ${challenge.challengeId}`,
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Unable to generate proof-of-delivery challenge.';
+
+      setAuthNotice({
+        tone: 'danger',
+        title: 'Challenge failed',
+        message,
+      });
+      pushLiveNotification({
+        tone: 'danger',
+        title: 'PoD challenge failed',
+        message,
+      });
+    } finally {
+      setIssuingPodChallenge(false);
+    }
+  }
+
+  async function handleVerifyPodChallenge(options?: { replay?: boolean }) {
+    if (!activeSession || !podChallengeEnvelope) {
+      return;
+    }
+
+    if (options?.replay) {
+      setReplayingPodChallenge(true);
+    } else {
+      setVerifyingPodChallenge(true);
+    }
+    setAuthNotice(null);
+
+    try {
+      const result = await podApi.verifyScannedChallenge({
+        loginData,
+        session: activeSession,
+        challengePayload: podChallengeEnvelope.qrPayload,
+      });
+      setPodVerificationOutcome(result);
+
+      const targetDeliveryId = result.deliveryId ?? podChallengeEnvelope.deliveryId;
+      await Promise.all([
+        refreshLatestPodReceipt(targetDeliveryId),
+        (async () => {
+          const refreshedDashboard = await getDashboardScreenData();
+          setLiveDashboardData(previousDashboard => {
+            emitRealtimeNotifications(previousDashboard, refreshedDashboard);
+            return refreshedDashboard;
+          });
+        })(),
+      ]);
+
+      const noticeTone =
+        result.state === 'verification-success'
+          ? 'success'
+          : result.state === 'replay-rejected'
+            ? 'warning'
+            : 'danger';
+      const noticeTitle =
+        result.state === 'verification-success'
+          ? 'Receipt verified'
+          : result.state === 'replay-rejected'
+            ? 'Replay blocked'
+            : result.state === 'challenge-expired'
+              ? 'Challenge expired'
+              : 'Signature mismatch';
+      const noticeMessage =
+        result.state === 'verification-success'
+          ? `Receipt ${result.receiptId ?? 'created'} countersigned and persisted.`
+          : `${result.rejectionCode ?? 'POD_REJECTED'} · ${result.rejectionReason ?? 'Validation failed.'}`;
+
+      setAuthNotice({
+        tone: noticeTone,
+        title: noticeTitle,
+        message: noticeMessage,
+      });
+      pushLiveNotification({
+        tone: noticeTone,
+        title: options?.replay ? 'PoD replay check' : 'PoD verification',
+        message: noticeMessage,
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Unable to verify scanned proof.';
+
+      setAuthNotice({
+        tone: 'danger',
+        title: 'PoD verification failed',
+        message,
+      });
+      pushLiveNotification({
+        tone: 'danger',
+        title: 'PoD verification failed',
+        message,
+      });
+    } finally {
+      setVerifyingPodChallenge(false);
+      setReplayingPodChallenge(false);
+    }
+  }
+
   function handleSignOut() {
     setOtpChallenge(null);
     setOtpCode('');
@@ -1217,7 +1411,12 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
     setSelectedTab('Command');
     setCommandSubview('main');
     setFieldOtpChallenge(null);
-    setScanDemoState('idle');
+    setPodChallengeEnvelope(null);
+    setPodVerificationOutcome(null);
+    setLatestPodReceipt(null);
+    setIssuingPodChallenge(false);
+    setVerifyingPodChallenge(false);
+    setReplayingPodChallenge(false);
     setExpandedConflictId(null);
     setAuditTerminalLines([]);
     setLiveNotifications([]);
@@ -2024,11 +2223,23 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
   }
 
   function renderScannerTab() {
+    const challengeExpirySeconds = podChallengeEnvelope
+      ? Math.max(
+          0,
+          Math.ceil((podChallengeEnvelope.expiresAtMs - Date.now()) / 1000),
+        )
+      : 0;
+
     return (
       <View className="gap-3">
         <Text className="text-[11px] font-semibold uppercase tracking-wider text-[#7A8BAD]">
           Proof of delivery
         </Text>
+        <Text className="text-[12px] text-[#8FA0BC]">
+          Delivery {scannerDeliveryId ?? '—'} · signed challenge-response ·
+          nonce replay lock.
+        </Text>
+
         <View className="relative min-h-[280px] overflow-hidden rounded-xl border border-[#3A4D6C] bg-[#05080e]">
           <View className="absolute inset-0 bg-[#0a1628] opacity-90" />
           <View className="absolute left-3 top-3 h-6 w-6 border-l-2 border-t-2 border-[#6B7A92]" />
@@ -2036,48 +2247,121 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
           <View className="absolute bottom-3 left-3 h-6 w-6 border-b-2 border-l-2 border-[#6B7A92]" />
           <View className="absolute bottom-3 right-3 h-6 w-6 border-b-2 border-r-2 border-[#6B7A92]" />
           <View className="flex-1 items-center justify-center px-6 py-12">
-            <Text className="text-center text-[13px] text-[#6B7A92]">
-              Camera not wired · placeholder
-            </Text>
+            {podChallengeEnvelope ? (
+              <View className="gap-2">
+                <Text className="text-center text-[12px] font-semibold text-[#BFD0F7]">
+                  Challenge {podChallengeEnvelope.challengeId}
+                </Text>
+                <Text className="text-center text-[11px] text-[#93A5C3]">
+                  Expires in {challengeExpirySeconds}s
+                </Text>
+                <Text className="text-center text-[11px] leading-5 text-[#6B7A92]">
+                  {podChallengeEnvelope.qrPayload.slice(0, 64)}...
+                </Text>
+              </View>
+            ) : (
+              <Text className="text-center text-[13px] text-[#6B7A92]">
+                Generate challenge to simulate QR scanner handshake.
+              </Text>
+            )}
           </View>
         </View>
 
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Simulate scan"
-          onPress={() =>
-            setScanDemoState(previous =>
-              previous === 'idle'
-                ? 'success'
-                : previous === 'success'
-                  ? 'tamper'
-                  : 'idle',
-            )
-          }
-          className="min-h-[48px] items-center justify-center rounded-lg bg-[#BFD0F7] px-4"
-        >
-          <Text className="text-[14px] font-semibold text-[#102950]">
-            Simulate scan
-          </Text>
-        </Pressable>
+        <View className="gap-2">
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Generate signed challenge"
+            disabled={issuingPodChallenge || !scannerDeliveryId}
+            onPress={handleGeneratePodChallenge}
+            className={`min-h-[48px] items-center justify-center rounded-lg bg-[#BFD0F7] px-4 ${
+              issuingPodChallenge || !scannerDeliveryId ? 'opacity-60' : ''
+            }`}
+          >
+            <Text className="text-[14px] font-semibold text-[#102950]">
+              {issuingPodChallenge ? 'Signing challenge…' : 'Generate challenge'}
+            </Text>
+          </Pressable>
 
-        {scanDemoState === 'idle' ? (
-          <Text className="text-[12px] text-[#6B7A92]">Idle</Text>
-        ) : null}
-        {scanDemoState === 'success' ? (
-          <View className="rounded-xl border border-[#37635B] bg-[#17332E] p-3">
-            <Text className="text-[13px] font-medium text-[#9FD4C4]">Verified</Text>
-            <Text className="mt-1 text-[13px] text-[#C4D4E8]">
-              Signature OK · receipt recorded (demo)
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Verify scanned challenge"
+            disabled={!podChallengeEnvelope || verifyingPodChallenge}
+            onPress={() => {
+              void handleVerifyPodChallenge();
+            }}
+            className={`min-h-[48px] items-center justify-center rounded-lg bg-[#8FD1B5] px-4 ${
+              !podChallengeEnvelope || verifyingPodChallenge ? 'opacity-60' : ''
+            }`}
+          >
+            <Text className="text-[14px] font-semibold text-[#103825]">
+              {verifyingPodChallenge ? 'Verifying signature…' : 'Verify and countersign'}
+            </Text>
+          </Pressable>
+
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Replay scanned challenge"
+            disabled={!podChallengeEnvelope || replayingPodChallenge}
+            onPress={() => {
+              void handleVerifyPodChallenge({ replay: true });
+            }}
+            className={`min-h-[48px] items-center justify-center rounded-lg bg-[#E6A786] px-4 ${
+              !podChallengeEnvelope || replayingPodChallenge ? 'opacity-60' : ''
+            }`}
+          >
+            <Text className="text-[14px] font-semibold text-[#3F2416]">
+              {replayingPodChallenge ? 'Checking replay guard…' : 'Replay same challenge'}
+            </Text>
+          </Pressable>
+        </View>
+
+        {podVerificationOutcome ? (
+          <View
+            className={`rounded-xl border p-3 ${
+              podVerificationOutcome.state === 'verification-success'
+                ? 'border-[#37635B] bg-[#17332E]'
+                : podVerificationOutcome.state === 'replay-rejected'
+                  ? 'border-[#6B5A2F] bg-[#3A301B]'
+                  : 'border-[#6A403D] bg-[#3A2221]'
+            }`}
+          >
+            <Text className="text-[13px] font-medium text-[#F0F4FD]">
+              {formatPodVerificationStateLabel(podVerificationOutcome.state)}
+            </Text>
+            <Text className="mt-1 text-[13px] text-[#D5DFEF]">
+              {podVerificationOutcome.rejectionCode
+                ? `${podVerificationOutcome.rejectionCode} · ${podVerificationOutcome.rejectionReason ?? 'Rejected'}`
+                : `Receipt ${podVerificationOutcome.receiptId ?? '—'} verified at ${formatZuluTimestamp(podVerificationOutcome.verifiedAtMs)}`}
             </Text>
           </View>
-        ) : null}
-        {scanDemoState === 'tamper' ? (
-          <View className="rounded-xl border border-[#6A403D] bg-[#3A2221] p-3">
-            <Text className="text-[13px] font-medium text-[#F0B39A]">Rejected</Text>
-            <Text className="mt-1 text-[13px] text-[#E7ECF8]">
-              Hash mismatch · audit event (demo)
+        ) : (
+          <Text className="text-[12px] text-[#6B7A92]">
+            Waiting for challenge issuance.
+          </Text>
+        )}
+
+        {latestPodReceipt ? (
+          <View className="rounded-xl border border-[#2A3F5E] bg-[#131E31] p-3">
+            <Text className="text-[11px] font-semibold uppercase tracking-wider text-[#8FA7CB]">
+              Latest receipt
             </Text>
+            <Text className="mt-2 text-[13px] text-[#E4EBFA]">
+              {latestPodReceipt.receiptId} · {latestPodReceipt.status}
+            </Text>
+            <Text className="mt-1 text-[12px] text-[#9EB0D0]">
+              Sender {latestPodReceipt.senderDeviceId} · Recipient{' '}
+              {latestPodReceipt.recipientDeviceId ?? 'pending'}
+            </Text>
+            <Text className="mt-1 text-[11px] text-[#7F91AE]">
+              Issued {formatZuluTimestamp(latestPodReceipt.issuedAtMs)} · Expires{' '}
+              {formatZuluTimestamp(latestPodReceipt.expiresAtMs)}
+            </Text>
+            {latestPodReceipt.rejectionCode ? (
+              <Text className="mt-1 text-[11px] text-[#E6B5A8]">
+                {latestPodReceipt.rejectionCode} ·{' '}
+                {latestPodReceipt.rejectionReason ?? 'Rejected'}
+              </Text>
+            ) : null}
           </View>
         ) : null}
       </View>
@@ -2803,6 +3087,30 @@ function formatRisk(risk?: number): string {
 
 function formatStatusLabel(status: string): string {
   return status.replace(/_/g, ' ');
+}
+
+function formatPodVerificationStateLabel(
+  state:
+    | 'challenge-generated'
+    | 'verification-success'
+    | 'signature-mismatch'
+    | 'replay-rejected'
+    | 'challenge-expired',
+): string {
+  switch (state) {
+    case 'challenge-generated':
+      return 'Challenge generated';
+    case 'verification-success':
+      return 'Verification success';
+    case 'signature-mismatch':
+      return 'Signature mismatch';
+    case 'replay-rejected':
+      return 'Replay rejected';
+    case 'challenge-expired':
+      return 'Challenge expired';
+    default:
+      return 'Unknown state';
+  }
 }
 
 function formatEdgeTypeLabel(edgeType: string): string {
