@@ -1,7 +1,10 @@
 import * as nacl from 'tweetnacl';
-import * as ed2curve from 'ed2curve';
 
 import { computeSha256Hex, hexToBytes, randomBytes } from '../auth/crypto';
+import {
+  convertPublicKey as convertEdPublicToCurve,
+  convertSecretKey as convertEdSecretToCurve,
+} from './ed25519-curve';
 
 export type MeshKeyPair = {
   publicKey: Uint8Array;
@@ -26,7 +29,7 @@ export function deriveMeshPublicKeyFromEd25519PublicPem(
   publicKeyPem: string,
 ): Uint8Array {
   const edPublic = extractEd25519PublicKeyFromPem(publicKeyPem);
-  const converted = ed2curve.convertPublicKey(edPublic);
+  const converted = convertEdPublicToCurve(edPublic);
 
   if (!converted) {
     throw new Error('Unable to derive mesh public key from Ed25519 public key.');
@@ -42,8 +45,8 @@ export function deriveMeshKeyPairFromIdentity(input: {
   const edPublic = extractEd25519PublicKeyFromPem(input.publicKeyPem);
   const edSecret = hexToBytes(input.secretKeyHex);
 
-  const convertedPublic = ed2curve.convertPublicKey(edPublic);
-  const convertedSecret = ed2curve.convertSecretKey(edSecret);
+  const convertedPublic = convertEdPublicToCurve(edPublic);
+  const convertedSecret = convertEdSecretToCurve(edSecret);
 
   if (!convertedPublic || !convertedSecret) {
     throw new Error('Unable to derive mesh key pair from Ed25519 identity material.');
