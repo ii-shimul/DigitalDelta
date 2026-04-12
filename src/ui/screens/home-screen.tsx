@@ -18,6 +18,8 @@ import {
 } from '../../api/auth';
 import { InventoryTab } from '../components/inventory-tab';
 import { MeshTab } from '../components/mesh-tab';
+import { RoutingTab } from '../components/routing-tab';
+import { TriageTab } from '../components/triage-tab';
 import type {
   AuditChainVerificationResult,
   DeviceIdentityRecord,
@@ -36,7 +38,14 @@ type Props = {
   onLogout: () => void;
 };
 
-type Tab = 'mission' | 'identity' | 'audit' | 'inventory' | 'mesh';
+type Tab =
+  | 'mission'
+  | 'identity'
+  | 'audit'
+  | 'inventory'
+  | 'mesh'
+  | 'triage'
+  | 'routing';
 
 export default function HomeScreen({ user, onLogout }: Props) {
   const [activeTab, setActiveTab] = useState<Tab>('mission');
@@ -123,6 +132,8 @@ export default function HomeScreen({ user, onLogout }: Props) {
         {activeTab === 'audit' && renderAudit()}
         {activeTab === 'inventory' && <InventoryTab user={user} />}
         {activeTab === 'mesh' && <MeshTab user={user} />}
+        {activeTab === 'triage' && <TriageTab user={user} />}
+        {activeTab === 'routing' && <RoutingTab />}
       </ScrollView>
 
       {/* Bottom Nav */}
@@ -151,6 +162,16 @@ export default function HomeScreen({ user, onLogout }: Props) {
           label="Mesh"
           active={activeTab === 'mesh'}
           onPress={() => setActiveTab('mesh')}
+        />
+        <TabButton
+          label="Triage"
+          active={activeTab === 'triage'}
+          onPress={() => setActiveTab('triage')}
+        />
+        <TabButton
+          label="Routes"
+          active={activeTab === 'routing'}
+          onPress={() => setActiveTab('routing')}
         />
       </View>
     </SafeAreaView>
