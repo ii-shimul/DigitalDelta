@@ -7,6 +7,7 @@ module.exports = {
     '**/__tests__/auth.test.ts',
     '**/__tests__/module123.test.ts',
     '**/__tests__/module4.test.ts',
+    '**/__tests__/module5.test.ts',
   ],
   moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json'],
 };
