@@ -4,12 +4,14 @@ import {
   createSQLiteAuthService,
   createSQLiteLedgerService,
   createSQLiteRoutingService,
+  createSQLiteTriageService,
   encodeUtf8,
   tickVectorClock,
   type AppRole,
   type EdgeStatusUpdate,
   type RouteMode,
   type RoutePlanDto,
+  type TriageDecisionDto,
 } from '../core';
 import { getDatabase } from '../db';
 
@@ -87,6 +89,17 @@ export type RoutingRecomputeResult = {
   affectedRoutes: RoutePlanDto[];
   routeEventIds: string[];
   edgeEventId: string;
+  triageEvaluations: RoutingTriageEvaluation[];
+};
+
+export type RoutingTriageEvaluation = {
+  deliveryId: string;
+  routeId: string;
+  slowedByPercent: number;
+  breachedCargoIds: string[];
+  triggered: boolean;
+  decision?: TriageDecisionDto;
+  reroutedRouteId?: string;
 };
 
 export class RoutingApi {
@@ -95,6 +108,8 @@ export class RoutingApi {
   private readonly ledgerService = createSQLiteLedgerService();
 
   private readonly routingService = createSQLiteRoutingService();
+
+  private readonly triageService = createSQLiteTriageService();
 
   async getRoutingOverview(): Promise<RoutingOverview> {
     const db = await getDatabase();
@@ -214,6 +229,13 @@ export class RoutingApi {
     await this.assertPermission(actor, 'edge_status', 'write');
     await this.assertPermission(actor, 'route', 'write');
 
+    const impactedContexts = await this.routingService.getRecomputeContextsByEdge(
+      input.edgeId,
+    );
+    const previousEtaByRouteId = await this.loadRouteEtaByRouteId(
+      impactedContexts.map(context => context.routeId),
+    );
+
     const update: EdgeStatusUpdate = {
       edgeId: input.edgeId,
       status: input.status,
@@ -233,6 +255,7 @@ export class RoutingApi {
 
     const edgeEventId = createIdentifier('evt-edge');
     const routeEventIds: string[] = [];
+    const triageEvaluations: RoutingTriageEvaluation[] = [];
 
     let workingClock = await this.ledgerService.getLatestVectorClockForDevice(
       actor.deviceId,
@@ -291,6 +314,33 @@ export class RoutingApi {
           totalRiskScore: route.totalRiskScore,
         },
       });
+
+      const baselineEtaMinutes = previousEtaByRouteId.get(route.routeId);
+      if (
+        typeof baselineEtaMinutes === 'number' &&
+        Number.isFinite(baselineEtaMinutes) &&
+        baselineEtaMinutes > 0
+      ) {
+        const triageEvaluation = await this.triageService.evaluateRouteImpact({
+          actor,
+          deliveryId: route.deliveryId,
+          routeId: route.routeId,
+          baselineEtaMinutes,
+          currentEtaMinutes: route.totalEtaMinutes,
+          nowMs: Date.now(),
+          safeWaypointNodeId: route.handoffNodeIds[0],
+        });
+
+        triageEvaluations.push({
+          deliveryId: route.deliveryId,
+          routeId: route.routeId,
+          slowedByPercent: triageEvaluation.slowedByPercent,
+          breachedCargoIds: triageEvaluation.breachedCargoIds,
+          triggered: triageEvaluation.triggered,
+          decision: triageEvaluation.decision,
+          reroutedRouteId: triageEvaluation.reroutedRouteId,
+        });
+      }
     }
 
     return {
@@ -302,6 +352,7 @@ export class RoutingApi {
       affectedRoutes,
       routeEventIds,
       edgeEventId,
+      triageEvaluations,
     };
   }
 
@@ -363,6 +414,35 @@ export class RoutingApi {
     if (!allowed) {
       throw new Error(`Role ${actor.role} is not permitted to ${action} ${resource}.`);
     }
+  }
+
+  private async loadRouteEtaByRouteId(
+    routeIds: string[],
+  ): Promise<Map<string, number>> {
+    const uniqueRouteIds = Array.from(new Set(routeIds.filter(Boolean)));
+    if (uniqueRouteIds.length === 0) {
+      return new Map();
+    }
+
+    const db = await getDatabase();
+    const placeholders = uniqueRouteIds.map(() => '?').join(', ');
+    const result = await db.execute(
+      `
+        SELECT
+          route_id AS routeId,
+          total_eta_minutes AS totalEtaMinutes
+        FROM route_plans
+        WHERE route_id IN (${placeholders})
+      `,
+      uniqueRouteIds,
+    );
+
+    const map = new Map<string, number>();
+    for (const row of result.rows) {
+      map.set(asString(row.routeId), asNumber(row.totalEtaMinutes));
+    }
+
+    return map;
   }
 }
 
