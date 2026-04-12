@@ -11,6 +11,8 @@ import {
 import { getDatabase } from '../db';
 import {
   BleMeshTransport,
+  InMemoryLoopbackTransport,
+  type MeshTransport,
   createSQLiteMeshSyncService,
   type MeshSyncActor,
   type SyncTransportKind,
@@ -48,7 +50,7 @@ export class SyncApi {
     session?: AuthenticatedSession;
     peerDeviceId?: string;
     transport?: SyncTransportKind;
-    injectConcurrentPeerMutation?: boolean;
+    listenWindowMs?: number;
   }): Promise<DeltaSyncCycleResult> {
     const actor = buildActor(input.loginData, input.session);
     await this.assertWritePermission(actor, 'supply_item');
@@ -58,7 +60,7 @@ export class SyncApi {
       (await this.findBestPeerDeviceId(actor.deviceId)) ??
       'DEV-BRAVO-02';
     const transport = input.transport ?? 'loopback';
-    let transportSent = false;
+    const listenWindowMs = Math.max(500, input.listenWindowMs ?? 5000);
 
     const localMutation = await this.applyLocalInventoryMutation(actor);
 
@@ -68,51 +70,45 @@ export class SyncApi {
       transport,
     });
 
-    if (transport === 'bluetooth_le') {
-      transportSent = await this.trySendEnvelopeOverBle(
-        peerDeviceId,
-        queued.envelopeBytes,
-      );
-    }
-
     let importedEventCount = 0;
     let conflictsDetected = 0;
 
-    if (input.injectConcurrentPeerMutation) {
-      const remoteDeltaEnvelope = await this.syncService.buildConcurrentPeerDelta({
-        peerDeviceId,
-        recipientDeviceId: actor.deviceId,
-        inventoryItemId: localMutation.inventoryItemId,
-        quantity: Math.max(0, localMutation.quantity - 3),
-        itemName: localMutation.itemName,
-        category: localMutation.category,
-        unit: localMutation.unit,
-        storageNodeId: localMutation.storageNodeId,
-        status: localMutation.status,
-      });
+    const transportAdapter = this.createTransportAdapter(transport, actor.deviceId);
+    let processingQueue = Promise.resolve();
+    const detachPacketHandler = transportAdapter.onPacket(packet => {
+      processingQueue = processingQueue
+        .then(async () => {
+          const inboundResult = await this.syncService.processIncomingEnvelope({
+            envelopeBytes: packet.payload,
+            receiver: actor,
+            transport,
+          });
 
-      const inboundResult = await this.syncService.processIncomingEnvelope({
-        envelopeBytes: remoteDeltaEnvelope,
-        receiver: actor,
-        transport,
-      });
+          importedEventCount += inboundResult.importedEventCount;
+          conflictsDetected += inboundResult.conflictsDetected;
 
-      importedEventCount += inboundResult.importedEventCount;
-      conflictsDetected += inboundResult.conflictsDetected;
+          if (inboundResult.ackEnvelopeBytes) {
+            await transportAdapter.send(
+              packet.peerDeviceId,
+              inboundResult.ackEnvelopeBytes,
+            );
+          }
+        })
+        .catch(() => undefined);
+    });
+
+    let transportSent = false;
+
+    try {
+      await transportAdapter.start();
+      await transportAdapter.send(peerDeviceId, queued.envelopeBytes);
+      transportSent = true;
+      await wait(listenWindowMs);
+      await processingQueue;
+    } finally {
+      detachPacketHandler();
+      await transportAdapter.stop();
     }
-
-    const ackEnvelopeBytes = await this.syncService.buildAckForOutboundEnvelope({
-      outboundEnvelopeId: queued.envelopeId,
-      senderDeviceId: peerDeviceId,
-      recipientDeviceId: actor.deviceId,
-      mergedCursor: queued.toCursor,
-    });
-
-    await this.syncService.processIncomingEnvelope({
-      envelopeBytes: ackEnvelopeBytes,
-      receiver: actor,
-      transport,
-    });
 
     return {
       peerDeviceId,
@@ -129,21 +125,15 @@ export class SyncApi {
     };
   }
 
-  private async trySendEnvelopeOverBle(
-    peerDeviceId: string,
-    envelopeBytes: Uint8Array,
-  ): Promise<boolean> {
-    const bleTransport = new BleMeshTransport();
-
-    try {
-      await bleTransport.start();
-      await bleTransport.send(peerDeviceId, envelopeBytes);
-      return true;
-    } catch {
-      return false;
-    } finally {
-      await bleTransport.stop();
+  private createTransportAdapter(
+    transport: SyncTransportKind,
+    localDeviceId: string,
+  ): MeshTransport {
+    if (transport === 'bluetooth_le') {
+      return new BleMeshTransport();
     }
+
+    return new InMemoryLoopbackTransport(localDeviceId);
   }
 
   private async findBestPeerDeviceId(
@@ -383,4 +373,10 @@ function asNumber(value: Scalar | unknown): number {
   }
 
   return 0;
+}
+
+function wait(durationMs: number): Promise<void> {
+  return new Promise(resolve => {
+    setTimeout(resolve, durationMs);
+  });
 }

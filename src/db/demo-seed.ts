@@ -781,6 +781,10 @@ function buildResetStatements(): SQLBatchTuple[] {
   return [
     ['DELETE FROM sync_outbox'],
     ['DELETE FROM sync_peers'],
+    ['DELETE FROM mesh_store_queue'],
+    ['DELETE FROM mesh_seen_envelopes'],
+    ['DELETE FROM mesh_relay_log'],
+    ['DELETE FROM mesh_node_state'],
     ['DELETE FROM ledger_events'],
     ['DELETE FROM conflicts'],
     ['DELETE FROM triage_decisions'],
