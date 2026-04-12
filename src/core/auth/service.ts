@@ -10,7 +10,11 @@ import { tickVectorClock } from '../crdt';
 import { buildAuthAuditEntry, verifyAuthAuditEntries } from './audit';
 import { AUTH_AUDIT_EVENT_TYPES, AUTH_PAYLOAD_TYPE_PREFIX } from './constants';
 import { bytesToHex, generateEd25519KeyPair, randomBytes } from './crypto';
-import { defaultDeviceKeyVault, type DeviceKeyVault } from './key-vault';
+import {
+  createSecureDeviceKeyVault,
+  defaultDeviceKeyVault,
+  type DeviceKeyVault,
+} from './key-vault';
 import {
   createInMemoryLedgerService,
   createSQLiteLedgerService,
@@ -40,7 +44,7 @@ export function createSQLiteAuthService(
   return createAuthService({
     authStore: createSQLiteAuthStore(),
     ledgerService: createSQLiteLedgerService(),
-    keyVault: options.keyVault,
+    keyVault: options.keyVault ?? createSecureDeviceKeyVault(),
     now: options.now,
   });
 }
@@ -149,6 +153,7 @@ export function createAuthService(options: {
         otpSessionId: createIdentifier('otp'),
         userId: input.userId,
         deviceId: input.deviceId,
+        requestedRole: input.role,
         otpSecretId: otpSecret.secretId,
         issuedCounter: issuedOtp.counter,
         algorithm: issuedOtp.algorithm,
@@ -158,7 +163,9 @@ export function createAuthService(options: {
         expiresAtMs: issuedOtp.expiresAtMs,
         failedAttemptCount: 0,
         status: 'issued',
-        metadata: {},
+        metadata: {
+          requestedRole: input.role,
+        },
       };
 
       await options.authStore.saveAuthSession(session);
@@ -266,6 +273,30 @@ export function createAuthService(options: {
         };
       }
 
+      if (!user.roles.includes(session.requestedRole)) {
+        session.failedAttemptCount += 1;
+        session.failureReason = 'role_not_assigned';
+        await options.authStore.saveAuthSession(session);
+
+        const authEventId = await appendAuthEvent({
+          actorDeviceId: session.deviceId,
+          authEventType: AUTH_AUDIT_EVENT_TYPES.loginFailure,
+          entityId: session.otpSessionId,
+          entityType: 'auth_session',
+          failureReason: 'role_not_assigned',
+          occurredAtMs: input.verifiedAtMs,
+          otpSession: session,
+          user,
+        });
+
+        return {
+          verified: false,
+          authEventId,
+          failureReason: 'role_not_assigned',
+          session,
+        };
+      }
+
       const otpSecret = await options.authStore.getOtpSecret(
         session.userId,
         session.deviceId,
@@ -352,7 +383,12 @@ export function createAuthService(options: {
       let deviceIdentity = await options.authStore.getDeviceIdentity(
         session.deviceId,
       );
-      if (!deviceIdentity) {
+      const storedKeyMaterial = await keyVault.get(session.deviceId);
+      if (
+        !deviceIdentity ||
+        !storedKeyMaterial ||
+        storedKeyMaterial.keyFingerprint !== deviceIdentity.keyFingerprint
+      ) {
         deviceIdentity = await this.provisionDeviceIdentity({
           userId: user.userId,
           deviceId: session.deviceId,
@@ -433,7 +469,11 @@ export function createAuthService(options: {
       entityType: input.entityType,
       entityId: input.entityId,
       eventType: 'auth',
-      actor: buildActor(input.user, input.actorDeviceId),
+      actor: buildActor(
+        input.user,
+        input.actorDeviceId,
+        input.otpSession?.requestedRole,
+      ),
       occurredAtMs: input.occurredAtMs,
       vectorClock: tickVectorClock(previousClock, input.actorDeviceId),
       payloadType: `${AUTH_PAYLOAD_TYPE_PREFIX}.${input.authEventType}`,
@@ -442,6 +482,7 @@ export function createAuthService(options: {
         authEventType: input.authEventType,
         failureReason: input.failureReason,
         keyFingerprint: input.keyFingerprint,
+        requestedRole: input.otpSession?.requestedRole,
       },
     });
 
@@ -473,6 +514,7 @@ function buildOtpSecret(
 function buildActor(
   user: AuthUserRecord | undefined,
   deviceId: string,
+  requestedRole?: AppRole,
 ): {
   userId: string;
   deviceId: string;
@@ -483,7 +525,7 @@ function buildActor(
     return {
       userId: user.userId,
       deviceId,
-      role: user.primaryRole,
+      role: requestedRole ?? user.primaryRole,
       displayName: user.displayName,
     };
   }

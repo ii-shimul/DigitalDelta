@@ -1,5 +1,6 @@
 export * from './audit';
 export * from './constants';
+export * from './crypto';
 export * from './key-vault';
 export * from './ledger-service';
 export * from './otp';

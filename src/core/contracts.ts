@@ -45,6 +45,7 @@ export type AuthFailureReason =
   | 'otp_expired'
   | 'otp_mismatch'
   | 'otp_secret_missing'
+  | 'role_not_assigned'
   | 'session_already_verified'
   | 'session_not_found'
   | 'user_inactive'
@@ -72,6 +73,7 @@ export type AuthSessionRecord = {
   otpSessionId: string;
   userId: string;
   deviceId: string;
+  requestedRole: AppRole;
   algorithm: OfflineOtpAlgorithm;
   digits: number;
   periodSeconds: number;
@@ -215,6 +217,7 @@ export interface AuthService {
   issueOfflineOtp(input: {
     userId: string;
     deviceId: string;
+    role: AppRole;
     issuedAtMs: number;
   }): Promise<IssuedOfflineOtpRecord>;
   verifyOfflineOtp(input: {

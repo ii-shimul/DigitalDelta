@@ -29,11 +29,13 @@ test('issues and verifies an offline OTP and provisions the device key', async (
   const issuedOtp = await authService.issueOfflineOtp({
     userId: testUser.userId,
     deviceId: 'DEV-TEST-01',
+    role: 'SUPPLY_MANAGER',
     issuedAtMs: BASE_TIME_MS,
   });
 
   expect(issuedOtp.code).toMatch(/^\d{6}$/);
   expect(issuedOtp.status).toBe('issued');
+  expect(issuedOtp.requestedRole).toBe('SUPPLY_MANAGER');
 
   const verification = await authService.verifyOfflineOtp({
     otpSessionId: issuedOtp.otpSessionId,
@@ -63,6 +65,7 @@ test('rejects an expired offline OTP', async () => {
   const issuedOtp = await authService.issueOfflineOtp({
     userId: testUser.userId,
     deviceId: 'DEV-TEST-02',
+    role: 'SUPPLY_MANAGER',
     issuedAtMs: BASE_TIME_MS,
   });
 

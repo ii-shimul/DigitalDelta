@@ -60,6 +60,10 @@ export interface AuthStore {
   saveAuthSession(record: StoredAuthSessionRecord): Promise<void>;
   getLatestAuthAuditEntry(): Promise<AuthAuditLogEntry | null>;
   appendAuthAuditEntry(record: AuthAuditLogEntry): Promise<void>;
+  overwriteAuthAuditEventBlob(
+    logId: string,
+    eventBlob: Uint8Array,
+  ): Promise<void>;
   listAuthAuditEntries(filter?: {
     userId?: string;
     deviceId?: string;
@@ -358,6 +362,17 @@ export function createSQLiteAuthStore(
         ],
       );
     },
+    async overwriteAuthAuditEventBlob(logId, eventBlob) {
+      const db = await resolvedDbProvider();
+      await db.execute(
+        `
+          UPDATE auth_audit_log
+          SET event_blob = ?
+          WHERE log_id = ?
+        `,
+        [eventBlob, logId],
+      );
+    },
     async listAuthAuditEntries(filter = {}) {
       const db = await resolvedDbProvider();
       const filters: string[] = [];
@@ -505,6 +520,19 @@ export function createInMemoryAuthStore(seed?: {
     async appendAuthAuditEntry(record) {
       authAuditEntries.push(cloneAuthAuditLogEntry(record));
     },
+    async overwriteAuthAuditEventBlob(logId, eventBlob) {
+      const entryIndex = authAuditEntries.findIndex(
+        entry => entry.logId === logId,
+      );
+      if (entryIndex < 0) {
+        return;
+      }
+
+      authAuditEntries[entryIndex] = {
+        ...authAuditEntries[entryIndex],
+        eventBlob: new Uint8Array(eventBlob),
+      };
+    },
     async listAuthAuditEntries(filter = {}) {
       return authAuditEntries
         .filter(entry => {
@@ -578,10 +606,13 @@ function mapOtpSecretRow(row: Record<string, Scalar>): OtpSecretRecord {
 function mapAuthSessionRow(
   row: Record<string, Scalar>,
 ): StoredAuthSessionRecord {
+  const metadata = parseJsonRecord(row.metadataJson);
+
   return {
     otpSessionId: asString(row.otpSessionId),
     userId: asString(row.userId),
     deviceId: asString(row.deviceId),
+    requestedRole: parseRequestedRole(metadata),
     otpSecretId: asString(row.otpSecretId),
     issuedCounter: asNumber(row.issuedCounter),
     algorithm: asString(row.algorithm) as OfflineOtpAlgorithm,
@@ -595,7 +626,7 @@ function mapAuthSessionRow(
     failureReason: asOptionalString(row.failureReason) as
       | AuthFailureReason
       | undefined,
-    metadata: parseJsonRecord(row.metadataJson),
+    metadata,
   };
 }
 
@@ -657,6 +688,13 @@ function parseJsonRecord(value: Scalar): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+function parseRequestedRole(metadata: Record<string, unknown>): AppRole {
+  const requestedRole = metadata.requestedRole;
+  return typeof requestedRole === 'string' && isAppRole(requestedRole)
+    ? requestedRole
+    : 'FIELD_VOLUNTEER';
 }
 
 function asAppRole(value: Scalar): AppRole {

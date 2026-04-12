@@ -27,6 +27,7 @@ export type HandoffFlowState =
 
 export type LoginScreenData = {
   userId: string;
+  deviceId: string;
   displayName: string;
   primaryRole: string;
   roles: string[];
