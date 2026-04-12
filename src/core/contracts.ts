@@ -10,6 +10,7 @@ export type AppRole =
 export type PermissionAction = 'read' | 'write' | 'execute';
 
 export type LedgerEntityKind =
+  | 'auth_session'
   | 'device'
   | 'user'
   | 'supply_item'
@@ -38,6 +39,17 @@ export type PriorityTier = 'P0' | 'P1' | 'P2' | 'P3';
 
 export type ConflictResolutionChoice = 'local' | 'remote' | 'merged' | 'manual';
 
+export type OfflineOtpAlgorithm = 'TOTP-SHA256';
+
+export type AuthFailureReason =
+  | 'otp_expired'
+  | 'otp_mismatch'
+  | 'otp_secret_missing'
+  | 'session_already_verified'
+  | 'session_not_found'
+  | 'user_inactive'
+  | 'user_not_found';
+
 export type ActorInput = {
   userId: string;
   deviceId: string;
@@ -53,14 +65,40 @@ export type DeviceIdentityRecord = {
   keyFingerprint: string;
   roles: AppRole[];
   provisionedAtMs: number;
+  lastRotatedAtMs?: number;
 };
 
 export type AuthSessionRecord = {
   otpSessionId: string;
   userId: string;
   deviceId: string;
+  algorithm: OfflineOtpAlgorithm;
+  digits: number;
+  periodSeconds: number;
   issuedAtMs: number;
   expiresAtMs: number;
+  verifiedAtMs?: number;
+  failedAttemptCount: number;
+  status: 'issued' | 'verified' | 'expired';
+  failureReason?: AuthFailureReason;
+};
+
+export type IssuedOfflineOtpRecord = AuthSessionRecord & {
+  code: string;
+};
+
+export type AuthVerificationResult = {
+  verified: boolean;
+  authEventId: string;
+  session?: AuthSessionRecord;
+  deviceIdentity?: DeviceIdentityRecord;
+  failureReason?: AuthFailureReason;
+};
+
+export type AuditChainVerificationResult = {
+  valid: boolean;
+  scannedEntries: number;
+  brokenLogId?: string;
 };
 
 export type PermissionCheckInput = {
@@ -178,13 +216,17 @@ export interface AuthService {
     userId: string;
     deviceId: string;
     issuedAtMs: number;
-  }): Promise<AuthSessionRecord>;
+  }): Promise<IssuedOfflineOtpRecord>;
   verifyOfflineOtp(input: {
     otpSessionId: string;
     code: string;
     verifiedAtMs: number;
-  }): Promise<{ verified: boolean; authEventId: string }>;
+  }): Promise<AuthVerificationResult>;
   hasPermission(input: PermissionCheckInput): Promise<boolean>;
+  verifyAuditTrail(input?: {
+    userId?: string;
+    deviceId?: string;
+  }): Promise<AuditChainVerificationResult>;
 }
 
 export interface LedgerService {

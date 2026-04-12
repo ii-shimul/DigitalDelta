@@ -3,7 +3,6 @@ import type { SQLBatchTuple } from '@op-engineering/op-sqlite';
 import { DIGITAL_DELTA_SCHEMA_VERSION, SYNC_CAPABILITIES } from '../core';
 
 import { getDatabase } from './database';
-import type { DatabaseHandle } from './types';
 
 export const PHASE0_DEMO_SCENARIO_ID = 'sylhet-flash-flood-delta';
 export const PHASE0_DEMO_BASE_TIME_MS = Date.parse('2026-04-12T08:00:00Z');
@@ -796,6 +795,8 @@ function buildResetStatements(): SQLBatchTuple[] {
     ['DELETE FROM vehicles'],
     ['DELETE FROM route_edges'],
     ['DELETE FROM network_nodes'],
+    ['DELETE FROM auth_sessions'],
+    ['DELETE FROM auth_otp_secrets'],
     ['DELETE FROM auth_audit_log'],
     ['DELETE FROM device_identity'],
     ['DELETE FROM users'],
