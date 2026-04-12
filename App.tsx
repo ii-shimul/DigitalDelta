@@ -1,165 +1,147 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   StatusBar,
   StyleSheet,
   Text,
-  useColorScheme,
   View,
 } from 'react-native';
-import {
-  SafeAreaProvider,
-  useSafeAreaInsets,
-} from 'react-native-safe-area-context';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 
-import type { ManualDemoSetupResult } from './src/utils/manualDemoSetup';
-import { AuthFlow } from './src/ui/navigation';
-import { runManualDemoSetup } from './src/utils/manualDemoSetup';
+import { getDatabase } from './src/db';
+import { getRegisteredUser, type RegisteredUser } from './src/api/auth';
+import RegisterScreen from './src/ui/screens/register-screen';
+import LoginScreen from './src/ui/screens/login-screen';
+import HomeScreen from './src/ui/screens/home-screen';
+
+type AppScreen = 'loading' | 'register' | 'login' | 'home';
 
 function App() {
-  const isDarkMode = useColorScheme() === 'dark';
-
   return (
     <SafeAreaProvider>
-      <StatusBar barStyle={isDarkMode ? 'light-content' : 'dark-content'} />
+      <StatusBar barStyle="dark-content" backgroundColor="#faf8ff" />
       <AppContent />
     </SafeAreaProvider>
   );
 }
 
 function AppContent() {
-  const safeAreaInsets = useSafeAreaInsets();
-  const [setupResult, setSetupResult] = useState<ManualDemoSetupResult | null>(
-    null,
-  );
-  const [setupError, setSetupError] = useState<string | null>(null);
+  const [screen, setScreen] = useState<AppScreen>('loading');
+  const [user, setUser] = useState<RegisteredUser | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    let isActive = true;
+    let active = true;
 
-    const setup = async () => {
+    (async () => {
       try {
-        const result = await runManualDemoSetup();
-        if (!isActive) {
+        await getDatabase();
+        const registered = await getRegisteredUser();
+
+        if (!active) {
           return;
         }
 
-        setSetupResult(result);
-      } catch (error) {
-        if (!isActive) {
+        if (registered) {
+          setUser(registered);
+          setScreen('login');
+        } else {
+          setScreen('register');
+        }
+      } catch (e) {
+        if (!active) {
           return;
         }
-
-        setSetupError(
-          error instanceof Error ? error.message : 'Manual setup failed.',
+        setError(
+          e instanceof Error ? e.message : 'Failed to initialize database',
         );
       }
-    };
-
-    setup();
+    })();
 
     return () => {
-      isActive = false;
+      active = false;
     };
   }, []);
 
-  if (setupError) {
+  const handleRegistered = useCallback((u: RegisteredUser) => {
+    setUser(u);
+    setScreen('login');
+  }, []);
+
+  const handleLoggedIn = useCallback(() => {
+    setScreen('home');
+  }, []);
+
+  const handleLogout = useCallback(() => {
+    setScreen('login');
+  }, []);
+
+  const handleSwitchToRegister = useCallback(() => {
+    setScreen('register');
+  }, []);
+
+  if (error) {
     return (
-      <View
-        style={[
-          styles.container,
-          styles.screen,
-          styles.errorScreen,
-          {
-            paddingTop: safeAreaInsets.top + 24,
-            paddingBottom: safeAreaInsets.bottom + 24,
-          },
-        ]}
-      >
-        <Text style={styles.eyebrow}>Digital Delta</Text>
-        <Text style={styles.title}>Authentication bootstrap failed</Text>
-        <Text style={styles.body}>{setupError}</Text>
+      <View style={styles.center}>
+        <Text style={styles.errorTitle}>Initialization Failed</Text>
+        <Text style={styles.errorBody}>{error}</Text>
       </View>
     );
   }
 
-  if (!setupResult) {
+  if (screen === 'loading') {
     return (
-      <View
-        style={[
-          styles.container,
-          styles.screen,
-          styles.loadingScreen,
-          {
-            paddingTop: safeAreaInsets.top + 24,
-            paddingBottom: safeAreaInsets.bottom + 24,
-          },
-        ]}
-      >
-        <ActivityIndicator size="large" color="#0c6c63" />
-        <Text style={styles.eyebrow}>Digital Delta</Text>
-        <Text style={styles.title}>Preparing authentication flow</Text>
-        <Text style={styles.body}>
-          Initializing seeded offline data and loading the real auth flow.
-        </Text>
+      <View style={styles.center}>
+        <ActivityIndicator size="large" color="#0058be" />
+        <Text style={styles.loadingText}>Initializing database...</Text>
       </View>
     );
   }
 
-  const { loginData, dashboardData } = setupResult;
+  if (screen === 'register') {
+    return <RegisterScreen onRegistered={handleRegistered} />;
+  }
 
-  return (
-    <View
-      style={[
-        styles.container,
-        {
-          paddingTop: safeAreaInsets.top,
-          paddingBottom: safeAreaInsets.bottom,
-        },
-      ]}
-    >
-      <AuthFlow dashboardData={dashboardData} loginData={loginData} />
-    </View>
-  );
+  if (screen === 'login' && user) {
+    return (
+      <LoginScreen
+        user={user}
+        onLoggedIn={handleLoggedIn}
+        onSwitchToRegister={handleSwitchToRegister}
+      />
+    );
+  }
+
+  if (screen === 'home' && user) {
+    return <HomeScreen user={user} onLogout={handleLogout} />;
+  }
+
+  return null;
 }
 
 const styles = StyleSheet.create({
-  container: {
+  center: {
     flex: 1,
-    backgroundColor: '#071220',
-  },
-  scrollContent: {
-    paddingHorizontal: 20,
-    gap: 16,
-  },
-  screen: {
+    backgroundColor: '#faf8ff',
     justifyContent: 'center',
     alignItems: 'center',
+    gap: 12,
     paddingHorizontal: 24,
   },
-  loadingScreen: {
-    gap: 12,
-  },
-  errorScreen: {
-    gap: 12,
-  },
-  eyebrow: {
-    color: '#aab8d4',
-    fontSize: 12,
+  errorTitle: {
+    fontSize: 20,
     fontWeight: '700',
-    letterSpacing: 1.2,
-    textTransform: 'uppercase',
+    color: '#93000a',
   },
-  title: {
-    color: '#e5ecfb',
-    fontSize: 24,
-    fontWeight: '800',
-    lineHeight: 30,
-  },
-  body: {
-    color: '#b1bfd8',
+  errorBody: {
     fontSize: 14,
-    lineHeight: 20,
+    color: '#565e74',
+    textAlign: 'center',
+  },
+  loadingText: {
+    fontSize: 14,
+    color: '#565e74',
+    marginTop: 8,
   },
 });
 

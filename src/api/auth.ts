@@ -1,264 +1,162 @@
 import type {
   AppRole,
-  AuthFailureReason,
-  AuthSessionRecord,
+  AuthVerificationResult,
+  AuditChainVerificationResult,
   DeviceIdentityRecord,
-} from '../core';
-import {
-  APP_ROLES,
-  createSQLiteAuthService,
-  createSQLiteAuthStore,
-  encodeUtf8,
-} from '../core';
+  IssuedOfflineOtpRecord,
+} from '../core/contracts';
+import { createSQLiteAuthService } from '../core/auth/service';
+import { createSQLiteAuthStore } from '../core/auth/store';
+import { bytesToHex, encodeUtf8, randomBytes } from '../core/auth/crypto';
+import { getDatabase } from '../db';
+import type { AuthService } from '../core/contracts';
+import type { AuthStore } from '../core/auth/store';
 
-import type { LoginScreenData } from './screen-contracts';
+let cachedAuthService: AuthService | null = null;
+let cachedAuthStore: AuthStore | null = null;
 
-export const AUTH_ROLES = APP_ROLES;
+function getAuthService(): AuthService {
+  if (!cachedAuthService) {
+    cachedAuthService = createSQLiteAuthService();
+  }
+  return cachedAuthService;
+}
 
-export type AuthRole = AppRole;
+function getAuthStore(): AuthStore {
+  if (!cachedAuthStore) {
+    cachedAuthStore = createSQLiteAuthStore();
+  }
+  return cachedAuthStore!;
+}
 
-export type AuthOtpChallenge = {
-  otpSessionId: string;
-  userId: string;
-  deviceId: string;
-  requestedRole: AuthRole;
-  issuedAtMs: number;
-  expiresAtMs: number;
-  demoCode: string;
-};
-
-export type AuthenticatedSession = {
-  authEventId: string;
+export type RegisteredUser = {
   userId: string;
   deviceId: string;
   displayName: string;
-  activeRole: AuthRole;
-  roles: AuthRole[];
-  authenticatedAtMs: number;
-  keyFingerprint?: string;
-  keyAlgorithm?: string;
+  role: AppRole;
 };
 
-export type AuthAuditStatus = {
-  valid: boolean;
-  scannedEntries: number;
-  brokenLogId?: string;
-  checkedAtMs: number;
-};
+export async function registerUser(input: {
+  displayName: string;
+  role: AppRole;
+}): Promise<RegisteredUser> {
+  const db = await getDatabase();
+  const nowMs = Date.now();
+  const userId = `USR-${bytesToHex(randomBytes(4)).toUpperCase()}`;
+  const deviceId = `DEV-${bytesToHex(randomBytes(4)).toUpperCase()}`;
 
-export type AuthFailureCode =
-  | 'OTP_INVALID'
-  | 'OTP_EXPIRED'
-  | 'ACCESS_DENIED'
-  | 'AUTH_SYSTEM_ERROR';
+  await db.execute(
+    `INSERT INTO users (user_id, display_name, primary_role, roles_json, status, created_at_ms, updated_at_ms)
+     VALUES (?, ?, ?, ?, 'active', ?, ?)`,
+    [
+      userId,
+      input.displayName.trim(),
+      input.role,
+      JSON.stringify([input.role]),
+      nowMs,
+      nowMs,
+    ],
+  );
 
-export type AuthFailureState = {
-  code: AuthFailureCode;
-  title: string;
-  message: string;
-  reason?: AuthFailureReason;
-};
+  const svc = getAuthService();
+  await svc.provisionDeviceIdentity({
+    userId,
+    deviceId,
+    displayName: input.displayName.trim(),
+    roles: [input.role],
+  });
 
-const authService = createSQLiteAuthService();
-const authStore = createSQLiteAuthStore();
-
-export class AuthApi {
-  async requestOtp(input: {
-    loginData: LoginScreenData;
-    selectedRole: AuthRole;
-  }): Promise<AuthOtpChallenge> {
-    const deviceId = requireDeviceId(input.loginData);
-
-    const issuedOtp = await authService.issueOfflineOtp({
-      userId: input.loginData.userId,
-      deviceId,
-      role: input.selectedRole,
-      issuedAtMs: Date.now(),
-    });
-
-    return {
-      otpSessionId: issuedOtp.otpSessionId,
-      userId: issuedOtp.userId,
-      deviceId: issuedOtp.deviceId,
-      requestedRole: issuedOtp.requestedRole,
-      issuedAtMs: issuedOtp.issuedAtMs,
-      expiresAtMs: issuedOtp.expiresAtMs,
-      demoCode: issuedOtp.code,
-    };
-  }
-
-  async verifyOtp(input: {
-    loginData: LoginScreenData;
-    otpSession: AuthOtpChallenge;
-    otpCode: string;
-  }): Promise<
-    | {
-        ok: true;
-        session: AuthenticatedSession;
-      }
-    | {
-        ok: false;
-        error: AuthFailureState;
-      }
-  > {
-    const verification = await authService.verifyOfflineOtp({
-      otpSessionId: input.otpSession.otpSessionId,
-      code: input.otpCode.trim(),
-      verifiedAtMs: Date.now(),
-    });
-
-    if (!verification.verified || !verification.session) {
-      return {
-        ok: false,
-        error: mapAuthFailure(verification.failureReason),
-      };
-    }
-
-    const activeRole = verification.session.requestedRole;
-    const roles = getAvailableAuthRoles(input.loginData);
-
-    return {
-      ok: true,
-      session: {
-        authEventId: verification.authEventId,
-        userId: input.loginData.userId,
-        deviceId: requireDeviceId(input.loginData),
-        displayName: input.loginData.displayName,
-        activeRole,
-        roles,
-        authenticatedAtMs: verification.session.verifiedAtMs ?? Date.now(),
-        keyFingerprint:
-          verification.deviceIdentity?.keyFingerprint ??
-          input.loginData.keyFingerprint,
-        keyAlgorithm:
-          verification.deviceIdentity?.keyAlgorithm ??
-          input.loginData.keyAlgorithm,
-      },
-    };
-  }
-
-  async rotateDeviceKey(input: {
-    loginData: LoginScreenData;
-  }): Promise<DeviceIdentityRecord> {
-    const roles = getAvailableAuthRoles(input.loginData);
-
-    return authService.provisionDeviceIdentity({
-      userId: input.loginData.userId,
-      deviceId: requireDeviceId(input.loginData),
-      displayName: input.loginData.displayName,
-      roles,
-    });
-  }
-
-  async verifyAuditTrail(input: {
-    loginData: LoginScreenData;
-  }): Promise<AuthAuditStatus> {
-    const result = await authService.verifyAuditTrail({
-      userId: input.loginData.userId,
-      deviceId: requireDeviceId(input.loginData),
-    });
-
-    return {
-      ...result,
-      checkedAtMs: Date.now(),
-    };
-  }
-
-  async injectAuditCorruptionForDemo(input: {
-    loginData: LoginScreenData;
-  }): Promise<{ corrupted: boolean; logId?: string }> {
-    const entries = await authStore.listAuthAuditEntries({
-      userId: input.loginData.userId,
-      deviceId: requireDeviceId(input.loginData),
-    });
-    const latestEntry = entries.at(-1);
-
-    if (!latestEntry) {
-      return { corrupted: false };
-    }
-
-    await authStore.overwriteAuthAuditEventBlob(
-      latestEntry.logId,
-      encodeUtf8(`tampered-auth-event:${Date.now()}`),
-    );
-
-    return {
-      corrupted: true,
-      logId: latestEntry.logId,
-    };
-  }
+  return {
+    userId,
+    deviceId,
+    displayName: input.displayName.trim(),
+    role: input.role,
+  };
 }
 
-export function getAvailableAuthRoles(loginData: LoginScreenData): AuthRole[] {
-  const roles = loginData.roles
-    .map(normalizeAuthRole)
-    .filter((role): role is AuthRole => Boolean(role));
+export async function getRegisteredUser(): Promise<RegisteredUser | null> {
+  const db = await getDatabase();
+  const result = await db.execute(
+    `SELECT u.user_id, u.display_name, u.primary_role, d.device_id
+     FROM users u
+     LEFT JOIN device_identity d ON d.user_id = u.user_id
+     WHERE u.status = 'active'
+     ORDER BY u.created_at_ms DESC
+     LIMIT 1`,
+  );
 
-  if (roles.length > 0) {
-    return Array.from(new Set(roles));
+  const row = result.rows[0];
+  if (!row) {
+    return null;
   }
 
-  const primaryRole = normalizeAuthRole(loginData.primaryRole);
-  return primaryRole ? [primaryRole] : ['FIELD_VOLUNTEER'];
+  return {
+    userId: String(row.user_id),
+    deviceId: row.device_id ? String(row.device_id) : '',
+    displayName: String(row.display_name),
+    role: String(row.primary_role) as AppRole,
+  };
 }
 
-export function normalizeAuthRole(value: string): AuthRole | null {
-  const normalizedValue = value
-    .trim()
-    .toUpperCase()
-    .replace(/[\s-]+/g, '_');
-
-  return AUTH_ROLES.find(role => role === normalizedValue) ?? null;
+export async function requestOtp(
+  userId: string,
+  deviceId: string,
+  role: AppRole,
+): Promise<IssuedOfflineOtpRecord> {
+  const svc = getAuthService();
+  return svc.issueOfflineOtp({
+    userId,
+    deviceId,
+    role,
+    issuedAtMs: Date.now(),
+  });
 }
 
-function requireDeviceId(loginData: LoginScreenData): string {
-  if (loginData.deviceId && loginData.deviceId.length > 0) {
-    return loginData.deviceId;
+export async function verifyOtp(
+  sessionId: string,
+  code: string,
+): Promise<AuthVerificationResult> {
+  const svc = getAuthService();
+  return svc.verifyOfflineOtp({
+    otpSessionId: sessionId,
+    code: code.trim(),
+    verifiedAtMs: Date.now(),
+  });
+}
+
+export async function getDeviceIdentity(
+  deviceId: string,
+): Promise<DeviceIdentityRecord | null> {
+  const store = getAuthStore();
+  return store.getDeviceIdentity(deviceId);
+}
+
+export async function verifyAuditTrail(): Promise<AuditChainVerificationResult> {
+  const svc = getAuthService();
+  return svc.verifyAuditTrail();
+}
+
+export async function getAuditLogCount(): Promise<number> {
+  const db = await getDatabase();
+  const result = await db.execute('SELECT COUNT(*) as cnt FROM auth_audit_log');
+  return Number(result.rows[0]?.cnt ?? 0);
+}
+
+export async function injectAuditCorruption(): Promise<{
+  corrupted: boolean;
+  logId?: string;
+}> {
+  const store = getAuthStore();
+  const entries = await store.listAuthAuditEntries();
+  const latest = entries.at(-1);
+  if (!latest) {
+    return { corrupted: false };
   }
 
-  throw new Error('Authentication requires a resolved device identity.');
-}
+  await store.overwriteAuthAuditEventBlob(
+    latest.logId,
+    encodeUtf8(`tampered-event:${Date.now()}`),
+  );
 
-function mapAuthFailure(reason?: AuthFailureReason): AuthFailureState {
-  switch (reason) {
-    case 'otp_expired':
-      return {
-        code: 'OTP_EXPIRED',
-        title: 'OTP expired',
-        message: 'The OTP expired. Generate a new code and verify again.',
-        reason,
-      };
-    case 'role_not_assigned':
-      return {
-        code: 'ACCESS_DENIED',
-        title: 'Role access denied',
-        message:
-          'This account is not allowed to authenticate with the selected role.',
-        reason,
-      };
-    case 'otp_mismatch':
-    case 'session_not_found':
-    case 'session_already_verified':
-      return {
-        code: 'OTP_INVALID',
-        title: 'OTP invalid',
-        message: 'The OTP could not be verified. Check the code and try again.',
-        reason,
-      };
-    case 'otp_secret_missing':
-    case 'user_inactive':
-    case 'user_not_found':
-    default:
-      return {
-        code:
-          reason === 'user_inactive' ? 'ACCESS_DENIED' : 'AUTH_SYSTEM_ERROR',
-        title:
-          reason === 'user_inactive' ? 'User inactive' : 'Authentication error',
-        message:
-          reason === 'user_inactive'
-            ? 'This account is inactive and cannot authenticate.'
-            : 'The authentication system could not complete this action.',
-        reason,
-      };
-  }
+  return { corrupted: true, logId: latest.logId };
 }
