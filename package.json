@@ -10,10 +10,18 @@
     "test": "jest"
   },
   "dependencies": {
+    "@op-engineering/op-sqlite": "^15.2.11",
+    "@react-native/new-app-screen": "0.85.0",
+    "leaflet": "^1.9.4",
+    "protobufjs": "^8.0.1",
     "react": "19.2.3",
     "react-native": "0.85.0",
-    "@react-native/new-app-screen": "0.85.0",
-    "react-native-safe-area-context": "^5.5.2"
+    "react-native-ble-plx": "^3.5.1",
+    "react-native-quick-crypto": "^1.0.19",
+    "react-native-safe-area-context": "^5.5.2",
+    "react-native-sodium": "^0.4.0",
+    "react-native-webview": "^13.16.1",
+    "zustand": "^5.0.12"
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",
