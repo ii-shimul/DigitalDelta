@@ -11,8 +11,10 @@ import {
   bytesToHex,
   computeSha256Hex,
   encodeUtf8,
+  hexToBytes,
   randomBytes,
 } from '../core/auth/crypto';
+import { createSecureDeviceKeyVault } from '../core/auth/key-vault';
 import { getDatabase } from '../db';
 import type { AuthService } from '../core/contracts';
 import type { AuthStore } from '../core/auth/store';
@@ -271,4 +273,19 @@ export async function injectAuditCorruption(): Promise<{
   );
 
   return { corrupted: true, logId: latest.logId };
+}
+
+// ── Mesh key material ──
+// Returns the Ed25519 seed for the local device so the mesh module can
+// derive an X25519 keypair for nacl.box encryption/decryption.
+// The seed never leaves this module boundary — it is not surfaced in any UI.
+export async function getLocalDeviceSeed(
+  deviceId: string,
+): Promise<Uint8Array | null> {
+  const vault = createSecureDeviceKeyVault();
+  const material = await vault.get(deviceId);
+  if (!material?.seedHex) {
+    return null;
+  }
+  return hexToBytes(material.seedHex);
 }

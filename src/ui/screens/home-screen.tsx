@@ -16,6 +16,8 @@ import {
   injectAuditCorruption,
   verifyAuditTrail,
 } from '../../api/auth';
+import { InventoryTab } from '../components/inventory-tab';
+import { MeshTab } from '../components/mesh-tab';
 import type {
   AuditChainVerificationResult,
   DeviceIdentityRecord,
@@ -34,7 +36,7 @@ type Props = {
   onLogout: () => void;
 };
 
-type Tab = 'mission' | 'identity' | 'audit';
+type Tab = 'mission' | 'identity' | 'audit' | 'inventory' | 'mesh';
 
 export default function HomeScreen({ user, onLogout }: Props) {
   const [activeTab, setActiveTab] = useState<Tab>('mission');
@@ -119,6 +121,8 @@ export default function HomeScreen({ user, onLogout }: Props) {
         {activeTab === 'mission' && renderMission()}
         {activeTab === 'identity' && renderIdentity()}
         {activeTab === 'audit' && renderAudit()}
+        {activeTab === 'inventory' && <InventoryTab user={user} />}
+        {activeTab === 'mesh' && <MeshTab user={user} />}
       </ScrollView>
 
       {/* Bottom Nav */}
@@ -134,9 +138,19 @@ export default function HomeScreen({ user, onLogout }: Props) {
           onPress={() => setActiveTab('identity')}
         />
         <TabButton
+          label="Inventory"
+          active={activeTab === 'inventory'}
+          onPress={() => setActiveTab('inventory')}
+        />
+        <TabButton
           label="Audit"
           active={activeTab === 'audit'}
           onPress={() => setActiveTab('audit')}
+        />
+        <TabButton
+          label="Mesh"
+          active={activeTab === 'mesh'}
+          onPress={() => setActiveTab('mesh')}
         />
       </View>
     </SafeAreaView>
@@ -202,6 +216,9 @@ export default function HomeScreen({ user, onLogout }: Props) {
             <CapabilityRow label="Cryptographic Identity" status="active" />
             <CapabilityRow label="Tamper-Evident Audit Log" status="active" />
             <CapabilityRow label="Role-Based Access Control" status="active" />
+            <CapabilityRow label="CRDT Inventory Sync" status="active" />
+            <CapabilityRow label="Vector Clock Causality" status="active" />
+            <CapabilityRow label="Conflict Resolution" status="active" />
             <CapabilityRow label="Mesh Network Sync" status="pending" />
             <CapabilityRow label="Route Optimization" status="pending" />
           </View>
