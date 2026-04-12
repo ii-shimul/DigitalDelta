@@ -1118,6 +1118,18 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
       });
       setLastRoutingRecompute(result);
 
+      const preemptedEvaluations = result.triageEvaluations.filter(
+        evaluation => evaluation.decision?.preempted,
+      );
+      if (preemptedEvaluations.length > 0) {
+        const firstDecision = preemptedEvaluations[0]?.decision;
+        pushLiveNotification({
+          tone: 'warning',
+          title: 'Autonomous triage preemption',
+          message: `${preemptedEvaluations.length} route(s) preempted · dropped ${firstDecision?.droppedCargoIds.length ?? 0} cargo at ${firstDecision?.safeWaypointNodeId ?? 'safe waypoint'}`,
+        });
+      }
+
       const [refreshedDashboard] = await Promise.all([
         getDashboardScreenData(),
         refreshRoutingOverview(),
@@ -1185,6 +1197,7 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
         affectedRoutes: [recomputedRoute],
         routeEventIds: [],
         edgeEventId: 'manual-recompute',
+        triageEvaluations: [],
       });
 
       const [refreshedDashboard] = await Promise.all([

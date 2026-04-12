@@ -350,7 +350,7 @@ class SQLiteRoutingService implements OperationalRoutingService {
           COALESCE(SUM(quantity), 0) AS payloadUnits
         FROM cargo_items
         WHERE delivery_id = ?
-          AND status NOT IN ('delivered', 'cancelled')
+          AND status NOT IN ('delivered', 'cancelled', 'deposited')
       `,
       [deliveryId],
     );
