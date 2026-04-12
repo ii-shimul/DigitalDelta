@@ -27,6 +27,7 @@ export type HandoffFlowState =
 
 export type LoginScreenData = {
   userId: string;
+  deviceId: string;
   displayName: string;
   primaryRole: string;
   roles: string[];
@@ -82,6 +83,8 @@ export type DashboardConflictSummary = {
   entityType: string;
   entityId: string;
   fieldName: string;
+  localValueText?: string;
+  remoteValueText?: string;
   resolutionText?: string;
   createdAtMs: number;
   resolvedAtMs?: number;

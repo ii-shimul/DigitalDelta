@@ -1,9 +1,16 @@
+export const BOTTOM_TAB_SCREENS = [
+  'Command',
+  'Inventory',
+  'Scanner',
+  'Mesh',
+  'Identity',
+] as const;
+
+export type BottomTabScreen = (typeof BOTTOM_TAB_SCREENS)[number];
+
 export const APP_SCREENS = [
   'Login',
-  'Dashboard',
-  'RouteDetails',
-  'DeliveryDetails',
-  'SyncStatus',
+  ...BOTTOM_TAB_SCREENS,
   'HandoffFlow',
 ] as const;
 
@@ -23,36 +30,36 @@ export type SyncPhaseRouteParam =
   | 'failed';
 
 export type RouteOrigin =
-  | 'dashboard'
-  | 'route-details'
-  | 'delivery-details'
-  | 'sync-status'
+  | 'command'
+  | 'inventory'
+  | 'scanner'
+  | 'mesh'
+  | 'identity'
   | 'handoff-flow';
 
 export type AppRouteParamList = {
   Login: undefined;
-  Dashboard:
+  Command:
     | {
         focusDeliveryId?: string;
         highlightState?: DashboardStateHighlight;
       }
     | undefined;
-  RouteDetails: {
-    deliveryId: string;
-    routeId: string;
+  Inventory: {
+    focusConflictId?: string;
     from?: RouteOrigin;
   };
-  DeliveryDetails: {
-    deliveryId: string;
-    openScanner?: boolean;
+  Scanner: {
+    openCamera?: boolean;
     from?: RouteOrigin;
   };
-  SyncStatus:
+  Mesh:
     | {
         peerDeviceId?: string;
         phase?: SyncPhaseRouteParam;
       }
     | undefined;
+  Identity: undefined;
   HandoffFlow: {
     deliveryId: string;
     handoffId?: string;
@@ -63,27 +70,22 @@ export type AppRouteParamList = {
 export type NavigationGraph = Record<AppScreen, readonly AppScreen[]>;
 
 export const NAVIGATION_GRAPH: NavigationGraph = {
-  Login: ['Dashboard'],
-  Dashboard: ['RouteDetails', 'DeliveryDetails', 'SyncStatus', 'HandoffFlow'],
-  RouteDetails: ['Dashboard', 'DeliveryDetails', 'SyncStatus', 'HandoffFlow'],
-  DeliveryDetails: ['Dashboard', 'RouteDetails', 'SyncStatus', 'HandoffFlow'],
-  SyncStatus: ['Dashboard', 'RouteDetails', 'DeliveryDetails', 'HandoffFlow'],
-  HandoffFlow: ['Dashboard', 'RouteDetails', 'DeliveryDetails', 'SyncStatus'],
+  Login: [...BOTTOM_TAB_SCREENS],
+  Command: ['Inventory', 'Scanner', 'Mesh', 'Identity', 'HandoffFlow'],
+  Inventory: ['Command', 'Scanner', 'Mesh', 'Identity', 'HandoffFlow'],
+  Scanner: ['Command', 'Inventory', 'Mesh', 'Identity', 'HandoffFlow'],
+  Mesh: ['Command', 'Inventory', 'Scanner', 'Identity', 'HandoffFlow'],
+  Identity: ['Command', 'Inventory', 'Scanner', 'Mesh', 'HandoffFlow'],
+  HandoffFlow: [...BOTTOM_TAB_SCREENS],
 };
 
 export const PRIMARY_DEMO_FLOW: readonly AppScreen[] = [
   'Login',
-  'Dashboard',
-  'RouteDetails',
-  'DeliveryDetails',
-  'SyncStatus',
+  ...BOTTOM_TAB_SCREENS,
   'HandoffFlow',
 ];
 
 export const OFFLINE_CRITICAL_SCREENS: readonly AppScreen[] = [
-  'Dashboard',
-  'RouteDetails',
-  'DeliveryDetails',
-  'SyncStatus',
+  ...BOTTOM_TAB_SCREENS,
   'HandoffFlow',
 ];

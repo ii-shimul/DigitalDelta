@@ -13,7 +13,7 @@ import {
 } from 'react-native-safe-area-context';
 
 import type { ManualDemoSetupResult } from './src/utils/manualDemoSetup';
-import { AuthAccessFlow } from './src/ui/navigation';
+import { AuthFlow } from './src/ui/navigation';
 import { runManualDemoSetup } from './src/utils/manualDemoSetup';
 
 function App() {
@@ -100,7 +100,7 @@ function AppContent() {
         <Text style={styles.eyebrow}>Digital Delta</Text>
         <Text style={styles.title}>Preparing authentication flow</Text>
         <Text style={styles.body}>
-          Initializing seeded offline data and loading auth placeholders.
+          Initializing seeded offline data and loading the real auth flow.
         </Text>
       </View>
     );
@@ -118,7 +118,7 @@ function AppContent() {
         },
       ]}
     >
-      <AuthAccessFlow dashboardData={dashboardData} loginData={loginData} />
+      <AuthFlow dashboardData={dashboardData} loginData={loginData} />
     </View>
   );
 }
@@ -126,7 +126,7 @@ function AppContent() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#f3efe7',
+    backgroundColor: '#071220',
   },
   scrollContent: {
     paddingHorizontal: 20,
@@ -144,20 +144,20 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   eyebrow: {
-    color: '#4f625f',
+    color: '#aab8d4',
     fontSize: 12,
     fontWeight: '700',
     letterSpacing: 1.2,
     textTransform: 'uppercase',
   },
   title: {
-    color: '#12211f',
+    color: '#e5ecfb',
     fontSize: 24,
     fontWeight: '800',
     lineHeight: 30,
   },
   body: {
-    color: '#31423f',
+    color: '#b1bfd8',
     fontSize: 14,
     lineHeight: 20,
   },
