@@ -16,10 +16,11 @@ import type {
 
 export type SeededScenarioScreen =
   | 'Login'
-  | 'Dashboard'
-  | 'RouteDetails'
-  | 'DeliveryDetails'
-  | 'SyncStatus'
+  | 'Command'
+  | 'Inventory'
+  | 'Scanner'
+  | 'Mesh'
+  | 'Identity'
   | 'HandoffFlow';
 
 export type SeededScenarioVariant =
@@ -70,6 +71,7 @@ const BASE_TIME_MS = Date.parse('2026-04-12T08:00:00.000Z');
 
 const seededLogin: LoginScreenData = {
   userId: 'USR_VOL_A01',
+  deviceId: 'DEV_A01',
   displayName: 'Amina Rahman',
   primaryRole: 'Field Volunteer',
   roles: ['Field Volunteer', 'Sync Admin'],
@@ -559,7 +561,8 @@ export const SEEDED_DEMO_SCENARIO: SeededDemoScenario = {
       state: 'signature-mismatch',
       status: 'signature_mismatch',
       rejectionCode: 'SIG_MISMATCH',
-      rejectionReason: 'Sender signature does not verify with known public key.',
+      rejectionReason:
+        'Sender signature does not verify with known public key.',
     },
     {
       state: 'replay-rejected',
@@ -571,7 +574,8 @@ export const SEEDED_DEMO_SCENARIO: SeededDemoScenario = {
       state: 'challenge-expired',
       status: 'expired',
       rejectionCode: 'EXPIRED_CHALLENGE',
-      rejectionReason: 'Challenge timestamp is outside allowed verification window.',
+      rejectionReason:
+        'Challenge timestamp is outside allowed verification window.',
     },
   ],
   demoScript: [
@@ -586,8 +590,8 @@ export const SEEDED_DEMO_SCENARIO: SeededDemoScenario = {
     {
       order: 2,
       stepId: 'dashboard-offline',
-      title: 'Dashboard Offline State',
-      targetScreen: 'Dashboard',
+      title: 'Command Offline State',
+      targetScreen: 'Command',
       variant: 'offline-baseline',
       objective: 'Show route/supply/triage panels while disconnected.',
     },
@@ -595,7 +599,7 @@ export const SEEDED_DEMO_SCENARIO: SeededDemoScenario = {
       order: 3,
       stepId: 'route-visualization',
       title: 'Route Recompute and Risk View',
-      targetScreen: 'RouteDetails',
+      targetScreen: 'Command',
       variant: 'offline-baseline',
       objective: 'Show blocked edge overlay and predicted-risk leg highlight.',
     },
@@ -603,7 +607,7 @@ export const SEEDED_DEMO_SCENARIO: SeededDemoScenario = {
       order: 4,
       stepId: 'pod-verification',
       title: 'PoD Verification Outcome',
-      targetScreen: 'DeliveryDetails',
+      targetScreen: 'Scanner',
       variant: 'verified-final',
       objective: 'Show QR challenge resolution and countersigned receipt.',
     },
@@ -611,7 +615,7 @@ export const SEEDED_DEMO_SCENARIO: SeededDemoScenario = {
       order: 5,
       stepId: 'mesh-sync-live',
       title: 'Mesh Sync Progress',
-      targetScreen: 'SyncStatus',
+      targetScreen: 'Mesh',
       variant: 'syncing-live',
       objective: 'Show peer discovery, envelope transfer, and ack progress.',
     },
@@ -619,9 +623,10 @@ export const SEEDED_DEMO_SCENARIO: SeededDemoScenario = {
       order: 6,
       stepId: 'conflict-and-resolution',
       title: 'Conflict Detected and Resolved',
-      targetScreen: 'Dashboard',
+      targetScreen: 'Inventory',
       variant: 'conflict-detected',
-      objective: 'Show conflict card with both values and final resolution path.',
+      objective:
+        'Show conflict card with both values and final resolution path.',
     },
     {
       order: 7,
@@ -629,7 +634,8 @@ export const SEEDED_DEMO_SCENARIO: SeededDemoScenario = {
       title: 'Boat to Drone Handoff',
       targetScreen: 'HandoffFlow',
       variant: 'verified-final',
-      objective: 'Show rendezvous, ownership transfer, and ledger proof linkage.',
+      objective:
+        'Show rendezvous, ownership transfer, and ledger proof linkage.',
     },
   ],
 };

@@ -18,6 +18,7 @@ export const APP_ROLES = [
 ] as const satisfies readonly AppRole[];
 
 export const LEDGER_ENTITY_TYPES = [
+  'auth_session',
   'device',
   'user',
   'supply_item',

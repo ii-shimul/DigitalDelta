@@ -35,6 +35,7 @@ export async function getLoginScreenData(
 
   return {
     userId: asString(row.userId),
+    deviceId: asString(row.deviceId),
     displayName: asString(row.displayName),
     primaryRole: asString(row.primaryRole),
     roles: parseJsonStringArray(row.rolesJson),
@@ -158,6 +159,7 @@ function buildLoginScreenQuery(input: LoginScreenQueryInput): {
     query: `
       SELECT
         u.user_id AS userId,
+        COALESCE(di.device_id, '') AS deviceId,
         u.display_name AS displayName,
         u.primary_role AS primaryRole,
         u.roles_json AS rolesJson,
