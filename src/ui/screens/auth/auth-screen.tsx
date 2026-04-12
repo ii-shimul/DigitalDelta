@@ -27,11 +27,15 @@ import type {
   MeshRelaySnapshot,
   MeshRoleCycleResult,
   MeshStoreForwardCycleResult,
+  RoutingEdgeOverview,
+  RoutingOverview,
+  RoutingRecomputeResult,
 } from '../../../api';
 import {
   AUTH_ROLES,
   AuthApi,
   MeshApi,
+  RoutingApi,
   SyncApi,
   getAvailableAuthRoles,
   getDashboardScreenData,
@@ -65,6 +69,7 @@ type LiveNotification = {
 const authApi = new AuthApi();
 const syncApi = new SyncApi();
 const meshApi = new MeshApi();
+const routingApi = new RoutingApi();
 
 const MAIN_TAB_ITEMS: Array<{
   label: string;
@@ -130,6 +135,12 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
     useState<MeshStoreForwardCycleResult | null>(null);
   const [meshRelaySnapshot, setMeshRelaySnapshot] =
     useState<MeshRelaySnapshot | null>(null);
+  const [routingOverview, setRoutingOverview] =
+    useState<RoutingOverview | null>(null);
+  const [lastRoutingRecompute, setLastRoutingRecompute] =
+    useState<RoutingRecomputeResult | null>(null);
+  const [updatingEdgeId, setUpdatingEdgeId] = useState<string | null>(null);
+  const [recomputingActiveRoute, setRecomputingActiveRoute] = useState(false);
   const [resolvingConflictId, setResolvingConflictId] = useState<string | null>(
     null,
   );
@@ -147,6 +158,10 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
   const dashboard = liveDashboardData;
   const isWideLayout = width >= 768;
   const routeSummary = dashboard.routes[0];
+  const activeRouteOverview =
+    routingOverview?.routes.find(route => route.routeId === routeSummary?.routeId) ??
+    routingOverview?.routes[0];
+  const routingEdges = routingOverview?.edges.slice(0, 6) ?? [];
   const supplySummaries = dashboard.supplies.slice(0, 3);
   const nodeSummaries = dashboard.nodeHealth.slice(0, 3);
   const primaryNodeBatteryPercent = dashboard.nodeHealth[0]?.batteryPercent;
@@ -208,6 +223,35 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
       clearInterval(timerId);
     };
   }, []);
+
+  useEffect(() => {
+    if (!activeSession) {
+      return;
+    }
+
+    let disposed = false;
+
+    const pollRoutingOverview = async () => {
+      try {
+        const nextOverview = await routingApi.getRoutingOverview();
+        if (disposed) {
+          return;
+        }
+
+        setRoutingOverview(nextOverview);
+      } catch {
+        // Routing overview polling must not block core auth/sync interactions.
+      }
+    };
+
+    void pollRoutingOverview();
+    const timerId = setInterval(pollRoutingOverview, 5000);
+
+    return () => {
+      disposed = true;
+      clearInterval(timerId);
+    };
+  }, [activeSession]);
 
   useEffect(() => {
     if (!otpChallenge) {
@@ -396,6 +440,23 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
         tone: 'success',
         title: 'Conflict resolved',
         message: `${unresolvedNow} unresolved conflict${unresolvedNow === 1 ? '' : 's'} remaining`,
+      });
+    }
+
+    const previousRoute = previousDashboard.routes[0];
+    const nextRoute = nextDashboard.routes[0];
+    if (
+      nextRoute &&
+      (!previousRoute ||
+        previousRoute.routeId !== nextRoute.routeId ||
+        previousRoute.etaMinutes !== nextRoute.etaMinutes ||
+        previousRoute.totalRiskScore !== nextRoute.totalRiskScore ||
+        previousRoute.computedAtMs !== nextRoute.computedAtMs)
+    ) {
+      pushLiveNotification({
+        tone: 'success',
+        title: 'Route recomputed',
+        message: `${nextRoute.deliveryId} · ETA ${nextRoute.etaMinutes ?? '—'}m · risk ${formatRisk(nextRoute.totalRiskScore)}`,
       });
     }
   }
@@ -992,6 +1053,160 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
     }
   }
 
+  async function refreshRoutingOverview() {
+    try {
+      const overview = await routingApi.getRoutingOverview();
+      setRoutingOverview(overview);
+    } catch {
+      // Routing view refresh is best-effort and should not block user flow.
+    }
+  }
+
+  async function handleUpdateRouteEdgeStatus(input: {
+    edge: RoutingEdgeOverview;
+    status: RoutingEdgeOverview['status'];
+  }) {
+    if (!activeSession) {
+      return;
+    }
+
+    setUpdatingEdgeId(input.edge.edgeId);
+
+    try {
+      const riskScore =
+        input.status === 'washed_out' || input.status === 'impassable'
+          ? Math.max(input.edge.riskScore, 0.98)
+          : input.status === 'degraded'
+            ? Math.max(input.edge.riskScore, 0.55)
+            : input.edge.riskScore;
+      const travelTimeMinutes =
+        input.status === 'washed_out' || input.status === 'impassable'
+          ? 9_999
+          : input.status === 'degraded'
+            ? Math.max(input.edge.travelTimeMinutes, Math.round(input.edge.travelTimeMinutes * 1.35))
+            : input.edge.travelTimeMinutes;
+
+      const result = await routingApi.updateEdgeStatusAndRecompute({
+        loginData,
+        session: activeSession,
+        edgeId: input.edge.edgeId,
+        status: input.status,
+        riskScore,
+        travelTimeMinutes,
+      });
+      setLastRoutingRecompute(result);
+
+      const [refreshedDashboard] = await Promise.all([
+        getDashboardScreenData(),
+        refreshRoutingOverview(),
+      ]);
+
+      setLiveDashboardData(previousDashboard => {
+        emitRealtimeNotifications(previousDashboard, refreshedDashboard);
+        return refreshedDashboard;
+      });
+
+      setAuthNotice({
+        tone: result.withinTwoSeconds ? 'success' : 'warning',
+        title: 'Route graph updated',
+        message: `${input.edge.edgeId} -> ${formatStatusLabel(input.status)} · recompute ${result.recomputeDurationMs}ms · affected ${result.affectedRoutes.length}`,
+      });
+      pushLiveNotification({
+        tone: result.withinTwoSeconds ? 'success' : 'warning',
+        title: 'Edge status changed',
+        message: `${input.edge.edgeId} ${formatStatusLabel(input.status)} · ${result.recomputeDurationMs}ms`,
+      });
+    } catch (error) {
+      setAuthNotice({
+        tone: 'danger',
+        title: 'Edge update failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Unable to update edge status and recompute routes.',
+      });
+      pushLiveNotification({
+        tone: 'danger',
+        title: 'Route update failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Unable to update edge status and recompute routes.',
+      });
+    } finally {
+      setUpdatingEdgeId(null);
+    }
+  }
+
+  async function handleRecomputeActiveRoute() {
+    if (!activeSession || !routeSummary?.routeId) {
+      return;
+    }
+
+    setRecomputingActiveRoute(true);
+
+    try {
+      const startedAtMs = Date.now();
+      const recomputedRoute = await routingApi.recomputeRoute({
+        loginData,
+        session: activeSession,
+        routeId: routeSummary.routeId,
+      });
+      const durationMs = Date.now() - startedAtMs;
+
+      setLastRoutingRecompute({
+        edgeId: 'manual-recompute',
+        updatedStatus: 'open',
+        updatedAtMs: Date.now(),
+        recomputeDurationMs: durationMs,
+        withinTwoSeconds: durationMs <= 2_000,
+        affectedRoutes: [recomputedRoute],
+        routeEventIds: [],
+        edgeEventId: 'manual-recompute',
+      });
+
+      const [refreshedDashboard] = await Promise.all([
+        getDashboardScreenData(),
+        refreshRoutingOverview(),
+      ]);
+
+      setLiveDashboardData(previousDashboard => {
+        emitRealtimeNotifications(previousDashboard, refreshedDashboard);
+        return refreshedDashboard;
+      });
+
+      setAuthNotice({
+        tone: durationMs <= 2_000 ? 'success' : 'warning',
+        title: 'Route recomputed',
+        message: `${recomputedRoute.routeId} recalculated in ${durationMs}ms · ETA ${recomputedRoute.totalEtaMinutes}m`,
+      });
+      pushLiveNotification({
+        tone: durationMs <= 2_000 ? 'success' : 'warning',
+        title: 'Manual route recompute',
+        message: `${recomputedRoute.routeId} · ${durationMs}ms`,
+      });
+    } catch (error) {
+      setAuthNotice({
+        tone: 'danger',
+        title: 'Route recompute failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Unable to recompute the active route.',
+      });
+      pushLiveNotification({
+        tone: 'danger',
+        title: 'Manual recompute failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Unable to recompute the active route.',
+      });
+    } finally {
+      setRecomputingActiveRoute(false);
+    }
+  }
+
   function handleSignOut() {
     setOtpChallenge(null);
     setOtpCode('');
@@ -1010,6 +1225,10 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
     setMeshRoleCycle(null);
     setMeshStoreForwardCycle(null);
     setMeshRelaySnapshot(null);
+    setRoutingOverview(null);
+    setLastRoutingRecompute(null);
+    setUpdatingEdgeId(null);
+    setRecomputingActiveRoute(false);
     setKeySnapshot({
       keyProvisioned: loginData.keyProvisioned,
       keyAlgorithm: loginData.keyAlgorithm,
@@ -1328,7 +1547,10 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
     return (
       <View className="gap-4">
         <Text className="text-[12px] text-[#6B7A92]">
-          Modes: road · water · air · cached map tiles
+          Modes: road · water · air · cached map tiles · recompute{' '}
+          {lastRoutingRecompute
+            ? `${lastRoutingRecompute.recomputeDurationMs}ms`
+            : 'idle'}
         </Text>
 
         <View className="overflow-hidden rounded-2xl bg-[#8B4513] px-4 py-4">
@@ -1372,15 +1594,129 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
             <View className="absolute left-24 top-14 h-[2px] w-[130px] rotate-[-32deg] bg-[#435270]" />
             <View className="absolute right-3 top-3 rounded bg-[#202C42] px-2 py-1">
               <Text className="text-[10px] font-medium text-[#CFD8EB]">
-                {routeSummary?.routeId ?? '—'}
+                {activeRouteOverview?.routeId ?? routeSummary?.routeId ?? '—'}
               </Text>
             </View>
             <View className="absolute bottom-3 left-3 rounded bg-[#1A2740] px-2 py-1">
               <Text className="text-[11px] text-[#DCE4F5]">
-                ETA {routeSummary?.etaMinutes ?? '—'} min
+                ETA{' '}
+                {activeRouteOverview?.totalEtaMinutes ?? routeSummary?.etaMinutes ?? '—'}{' '}
+                min
               </Text>
             </View>
           </View>
+        </View>
+
+        <View className="rounded-xl border border-[#253A5A] bg-[#17263C] p-4">
+          <View className="flex-row items-center justify-between gap-3">
+            <Text className="text-[11px] font-semibold uppercase tracking-wider text-[#8FA7CB]">
+              Routing controls
+            </Text>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Recompute active route"
+              disabled={recomputingActiveRoute || !routeSummary?.routeId}
+              onPress={handleRecomputeActiveRoute}
+              className={`rounded-md bg-[#BFD0F7] px-3 py-2 ${
+                recomputingActiveRoute || !routeSummary?.routeId
+                  ? 'opacity-50'
+                  : ''
+              }`}
+            >
+              <Text className="text-[11px] font-semibold text-[#102950]">
+                {recomputingActiveRoute ? 'Recomputing…' : 'Recompute route'}
+              </Text>
+            </Pressable>
+          </View>
+
+          {routingEdges.length === 0 ? (
+            <Text className="mt-3 text-[12px] text-[#94A9C9]">
+              No routing edges loaded.
+            </Text>
+          ) : (
+            <View className="mt-3 gap-2">
+              {routingEdges.map(edge => (
+                <View
+                  key={edge.edgeId}
+                  className="rounded-lg border border-[#2E4569] bg-[#0F1B2C] p-3"
+                >
+                  <Text className="text-[12px] font-semibold text-[#E4ECFA]">
+                    {edge.edgeId} · {formatEdgeTypeLabel(edge.edgeType)}
+                  </Text>
+                  <Text className="mt-1 text-[12px] text-[#A8B9D3]">
+                    {(edge.sourceLabel ?? edge.sourceNodeId) + ' -> ' +
+                      (edge.targetLabel ?? edge.targetNodeId)}
+                  </Text>
+                  <Text className="mt-1 text-[11px] text-[#8FA2C2]">
+                    {formatStatusLabel(edge.status)} · {edge.travelTimeMinutes}m ·
+                    risk {formatRisk(edge.riskScore)}
+                  </Text>
+
+                  <View className="mt-2 flex-row flex-wrap gap-2">
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={`Set ${edge.edgeId} open`}
+                      disabled={updatingEdgeId === edge.edgeId}
+                      onPress={() =>
+                        handleUpdateRouteEdgeStatus({ edge, status: 'open' })
+                      }
+                      className={`rounded-md bg-[#28445F] px-2.5 py-1.5 ${
+                        updatingEdgeId === edge.edgeId ? 'opacity-50' : ''
+                      }`}
+                    >
+                      <Text className="text-[11px] text-[#D9EEFF]">Open</Text>
+                    </Pressable>
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={`Set ${edge.edgeId} degraded`}
+                      disabled={updatingEdgeId === edge.edgeId}
+                      onPress={() =>
+                        handleUpdateRouteEdgeStatus({
+                          edge,
+                          status: 'degraded',
+                        })
+                      }
+                      className={`rounded-md bg-[#4A5A2B] px-2.5 py-1.5 ${
+                        updatingEdgeId === edge.edgeId ? 'opacity-50' : ''
+                      }`}
+                    >
+                      <Text className="text-[11px] text-[#E3F3D4]">Degraded</Text>
+                    </Pressable>
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={`Set ${edge.edgeId} washed out`}
+                      disabled={updatingEdgeId === edge.edgeId}
+                      onPress={() =>
+                        handleUpdateRouteEdgeStatus({
+                          edge,
+                          status: 'washed_out',
+                        })
+                      }
+                      className={`rounded-md bg-[#613232] px-2.5 py-1.5 ${
+                        updatingEdgeId === edge.edgeId ? 'opacity-50' : ''
+                      }`}
+                    >
+                      <Text className="text-[11px] text-[#FFD8D8]">Washed out</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              ))}
+            </View>
+          )}
+
+          {lastRoutingRecompute ? (
+            <View className="mt-3 rounded-lg border border-[#2E4569] bg-[#0F1B2C] px-3 py-2">
+              <Text className="text-[11px] text-[#D3E1F8]">
+                Last run: {lastRoutingRecompute.recomputeDurationMs}ms ·
+                {lastRoutingRecompute.withinTwoSeconds
+                  ? ' within 2s target'
+                  : ' above 2s target'}
+              </Text>
+              <Text className="mt-1 text-[11px] text-[#9FB3D2]">
+                Affected routes: {lastRoutingRecompute.affectedRoutes.length}
+              </Text>
+            </View>
+          ) : null}
         </View>
 
         <View className="rounded-xl border border-[#2A2038] bg-[#1A1525] px-4 py-3">
@@ -1442,13 +1778,31 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
             Active route
           </Text>
           <Text className="mt-2 text-[16px] font-semibold text-[#EEF3FC]">
-            {routeSummary?.routeId ?? 'None'}
+            {activeRouteOverview?.routeId ?? routeSummary?.routeId ?? 'None'}
           </Text>
           <Text className="mt-2 text-[14px] leading-5 text-[#B8C4DA]">
-            {routeSummary
-              ? `${routeSummary.deliveryId} · ETA ${routeSummary.etaMinutes ?? '—'} min · risk ${formatRisk(routeSummary.totalRiskScore)}`
+            {activeRouteOverview
+              ? `${activeRouteOverview.deliveryId} · ETA ${activeRouteOverview.totalEtaMinutes} min · risk ${formatRisk(activeRouteOverview.totalRiskScore)}`
+              : routeSummary
+                ? `${routeSummary.deliveryId} · ETA ${routeSummary.etaMinutes ?? '—'} min · risk ${formatRisk(routeSummary.totalRiskScore)}`
               : 'No route in current dataset.'}
           </Text>
+          {activeRouteOverview?.legs.length ? (
+            <View className="mt-3 gap-1">
+              {activeRouteOverview.legs.slice(0, 3).map(leg => (
+                <Text
+                  key={`${activeRouteOverview.routeId}-${leg.edgeId}-${leg.fromNodeId}`}
+                  className="text-[12px] text-[#9FB0C9]"
+                >
+                  {leg.fromNodeId}
+                  {' -> '}
+                  {leg.toNodeId} · {formatEdgeTypeLabel(leg.edgeType)} ·
+                  {' '}
+                  {leg.etaMinutes}m
+                </Text>
+              ))}
+            </View>
+          ) : null}
         </View>
 
         <View className="rounded-xl border border-[#213350] bg-[#212C40] p-4">
@@ -2449,6 +2803,22 @@ function formatRisk(risk?: number): string {
 
 function formatStatusLabel(status: string): string {
   return status.replace(/_/g, ' ');
+}
+
+function formatEdgeTypeLabel(edgeType: string): string {
+  if (edgeType === 'road') {
+    return 'Road';
+  }
+
+  if (edgeType === 'waterway') {
+    return 'Waterway';
+  }
+
+  if (edgeType === 'airway') {
+    return 'Airway';
+  }
+
+  return edgeType;
 }
 
 function estimateSignalStrength(dashboardData: DashboardScreenData): number {
