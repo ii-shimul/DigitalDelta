@@ -1,0 +1,76 @@
+syntax = "proto3";
+
+package digitaldelta.v1;
+
+option go_package = "github.com/ii-shimul/DigitalDelta/proto/digitaldelta/v1;digitaldeltav1";
+
+import "proto/common.proto";
+import "proto/identity.proto";
+import "proto/ledger.proto";
+
+enum SyncEnvelopeType {
+  SYNC_ENVELOPE_TYPE_UNSPECIFIED = 0;
+  SYNC_ENVELOPE_TYPE_HELLO = 1;
+  SYNC_ENVELOPE_TYPE_DELTA = 2;
+  SYNC_ENVELOPE_TYPE_ACK = 3;
+  SYNC_ENVELOPE_TYPE_NACK = 4;
+}
+
+enum SyncRejectionCode {
+  SYNC_REJECTION_CODE_UNSPECIFIED = 0;
+  SYNC_REJECTION_CODE_CURSOR_TOO_OLD = 1;
+  SYNC_REJECTION_CODE_INVALID_SIGNATURE = 2;
+  SYNC_REJECTION_CODE_UNSUPPORTED_SCHEMA_VERSION = 3;
+  SYNC_REJECTION_CODE_PAYLOAD_TOO_LARGE = 4;
+  SYNC_REJECTION_CODE_DUPLICATE_ENVELOPE = 5;
+  SYNC_REJECTION_CODE_MERGE_FAILED = 6;
+}
+
+message SyncCursor {
+  VectorClock last_known_clock = 1;
+  string last_event_id = 2;
+}
+
+message SyncHello {
+  string schema_version = 1;
+  DeviceIdentity identity = 2;
+  repeated string supported_capabilities = 3;
+  SyncCursor cursor = 4;
+}
+
+message SyncDelta {
+  SyncCursor from_cursor = 1;
+  SyncCursor to_cursor = 2;
+  repeated LedgerEvent events = 3;
+  uint32 estimated_bytes = 4;
+}
+
+message SyncAck {
+  string envelope_id = 1;
+  SyncCursor merged_cursor = 2;
+  repeated string accepted_event_ids = 3;
+  repeated string missing_event_ids = 4;
+}
+
+message SyncNack {
+  string envelope_id = 1;
+  SyncRejectionCode code = 2;
+  string detail = 3;
+}
+
+message SyncEnvelope {
+  string envelope_id = 1;
+  SyncEnvelopeType type = 2;
+  string sender_device_id = 3;
+  string recipient_device_id = 4;
+  uint64 sent_at_ms = 5;
+  VectorClock sender_clock = 6;
+  Signature envelope_signature = 7;
+
+  oneof body {
+    SyncHello hello = 8;
+    SyncDelta delta = 9;
+    SyncAck ack = 10;
+    SyncNack nack = 11;
+  }
+}

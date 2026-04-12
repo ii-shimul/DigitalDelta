@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package digitaldelta.v1;
+
+option go_package = "github.com/ii-shimul/DigitalDelta/proto/digitaldelta/v1;digitaldeltav1";
+
+import "proto/common.proto";
+import "proto/identity.proto";
+
+enum AuthEventType {
+  AUTH_EVENT_TYPE_UNSPECIFIED = 0;
+  AUTH_EVENT_TYPE_LOGIN_SUCCESS = 1;
+  AUTH_EVENT_TYPE_LOGIN_FAILURE = 2;
+  AUTH_EVENT_TYPE_OTP_FAILURE = 3;
+  AUTH_EVENT_TYPE_KEY_PROVISIONED = 4;
+  AUTH_EVENT_TYPE_KEY_ROTATED = 5;
+  AUTH_EVENT_TYPE_LOGOUT = 6;
+}
+
+message AuthEvent {
+  string auth_event_id = 1;
+  AuthEventType type = 2;
+  ActorRef actor = 3;
+  string subject_user_id = 4;
+  string subject_device_id = 5;
+  string otp_session_id = 6;
+  uint64 otp_issued_at_ms = 7;
+  uint64 otp_expires_at_ms = 8;
+  string key_fingerprint = 9;
+  HashChain audit_chain = 10;
+  string failure_reason = 11;
+}

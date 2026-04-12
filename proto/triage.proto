@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package digitaldelta.v1;
+
+option go_package = "github.com/ii-shimul/DigitalDelta/proto/digitaldelta/v1;digitaldeltav1";
+
+enum PriorityTier {
+  PRIORITY_TIER_UNSPECIFIED = 0;
+  PRIORITY_TIER_P0_CRITICAL = 1;
+  PRIORITY_TIER_P1_HIGH = 2;
+  PRIORITY_TIER_P2_STANDARD = 3;
+  PRIORITY_TIER_P3_LOW = 4;
+}
+
+message TriageDecision {
+  string decision_id = 1;
+  string delivery_id = 2;
+  PriorityTier highest_remaining_priority = 3;
+  bool preempted = 4;
+  repeated string dropped_cargo_ids = 5;
+  string safe_waypoint_node_id = 6;
+  string rationale = 7;
+  uint64 decided_at_ms = 8;
+}
