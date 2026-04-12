@@ -7,6 +7,8 @@ export type DeviceKeyMaterial = {
   secretKeyHex: string;
   seedHex: string;
   storedAtMs: number;
+  meshPublicKeyBase64?: string;
+  meshSecretKeyBase64?: string;
 };
 
 export interface DeviceKeyVault {

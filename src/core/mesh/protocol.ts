@@ -75,6 +75,20 @@ export type SyncEnvelopeWire = {
   nack?: SyncNackWire;
 };
 
+export type MeshForwardPacketWire = {
+  packetId: string;
+  senderDeviceId: string;
+  recipientDeviceId: string;
+  nextHopDeviceId?: string;
+  ttlHops: number;
+  hopCount: number;
+  createdAtMs: number;
+  senderMeshPublicKey: Uint8Array;
+  nonce: Uint8Array;
+  ciphertext: Uint8Array;
+  payloadHashHex: string;
+};
+
 const root = new Root();
 
 const EnvelopeTypeEnum = new Enum('EnvelopeType', {
@@ -142,6 +156,19 @@ const SyncEnvelopeMessage = new Type('SyncEnvelope')
   .add(new Field('nack', 11, 'SyncNack'))
   .add(new OneOf('body', ['hello', 'delta', 'ack', 'nack']));
 
+const MeshForwardPacketMessage = new Type('MeshForwardPacket')
+  .add(new Field('packet_id', 1, 'string'))
+  .add(new Field('sender_device_id', 2, 'string'))
+  .add(new Field('recipient_device_id', 3, 'string'))
+  .add(new Field('next_hop_device_id', 4, 'string'))
+  .add(new Field('ttl_hops', 5, 'uint32'))
+  .add(new Field('hop_count', 6, 'uint32'))
+  .add(new Field('created_at_ms', 7, 'uint64'))
+  .add(new Field('sender_mesh_public_key', 8, 'bytes'))
+  .add(new Field('nonce', 9, 'bytes'))
+  .add(new Field('ciphertext', 10, 'bytes'))
+  .add(new Field('payload_hash_hex', 11, 'string'));
+
 root
   .define('digitaldelta.v1')
   .add(EnvelopeTypeEnum)
@@ -152,7 +179,8 @@ root
   .add(SyncDeltaMessage)
   .add(SyncAckMessage)
   .add(SyncNackMessage)
-  .add(SyncEnvelopeMessage);
+  .add(SyncEnvelopeMessage)
+  .add(MeshForwardPacketMessage);
 
 const EnvelopeTypeByName: Record<SyncEnvelopeKind, number> = {
   HELLO: 1,
@@ -226,6 +254,64 @@ export function decodeSyncEnvelope(encoded: Uint8Array): SyncEnvelopeWire {
     delta: plain.delta ? fromProtoDelta(plain.delta) : undefined,
     ack: plain.ack ? fromProtoAck(plain.ack) : undefined,
     nack: plain.nack ? fromProtoNack(plain.nack) : undefined,
+  };
+}
+
+export function encodeMeshForwardPacket(
+  packet: MeshForwardPacketWire,
+): Uint8Array {
+  const encoded = MeshForwardPacketMessage.encode(
+    MeshForwardPacketMessage.create({
+      packet_id: packet.packetId,
+      sender_device_id: packet.senderDeviceId,
+      recipient_device_id: packet.recipientDeviceId,
+      next_hop_device_id: packet.nextHopDeviceId,
+      ttl_hops: packet.ttlHops,
+      hop_count: packet.hopCount,
+      created_at_ms: packet.createdAtMs,
+      sender_mesh_public_key: packet.senderMeshPublicKey,
+      nonce: packet.nonce,
+      ciphertext: packet.ciphertext,
+      payload_hash_hex: packet.payloadHashHex,
+    }),
+  ).finish();
+
+  return new Uint8Array(encoded);
+}
+
+export function decodeMeshForwardPacket(
+  encoded: Uint8Array,
+): MeshForwardPacketWire {
+  const decoded = MeshForwardPacketMessage.decode(encoded) as Message<{
+    packet_id?: string;
+    sender_device_id?: string;
+    recipient_device_id?: string;
+    next_hop_device_id?: string;
+    ttl_hops?: unknown;
+    hop_count?: unknown;
+    created_at_ms?: unknown;
+    sender_mesh_public_key?: Uint8Array;
+    nonce?: Uint8Array;
+    ciphertext?: Uint8Array;
+    payload_hash_hex?: string;
+  }>;
+  const plain = MeshForwardPacketMessage.toObject(decoded, {
+    longs: Number,
+    defaults: false,
+  }) as Record<string, unknown>;
+
+  return {
+    packetId: asString(plain.packet_id),
+    senderDeviceId: asString(plain.sender_device_id),
+    recipientDeviceId: asString(plain.recipient_device_id),
+    nextHopDeviceId: asOptionalString(plain.next_hop_device_id),
+    ttlHops: asNumber(plain.ttl_hops),
+    hopCount: asNumber(plain.hop_count),
+    createdAtMs: asNumber(plain.created_at_ms),
+    senderMeshPublicKey: asBytes(plain.sender_mesh_public_key) ?? new Uint8Array(),
+    nonce: asBytes(plain.nonce) ?? new Uint8Array(),
+    ciphertext: asBytes(plain.ciphertext) ?? new Uint8Array(),
+    payloadHashHex: asString(plain.payload_hash_hex),
   };
 }
 

@@ -212,6 +212,20 @@ export class SQLiteMeshSyncService {
     const db = await this.dbProvider();
     const envelope = decodeSyncEnvelope(input.envelopeBytes);
 
+    if (
+      envelope.recipientDeviceId &&
+      envelope.recipientDeviceId !== input.receiver.deviceId
+    ) {
+      return {
+        type: envelope.type,
+        envelopeId: envelope.envelopeId,
+        acceptedEventIds: [],
+        missingEventIds: [],
+        importedEventCount: 0,
+        conflictsDetected: 0,
+      };
+    }
+
     if (envelope.type === 'ACK' && envelope.ack) {
       await db.execute(
         `

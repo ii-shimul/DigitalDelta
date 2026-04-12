@@ -24,10 +24,14 @@ import type {
   DeltaSyncCycleResult,
   DashboardScreenData,
   LoginScreenData,
+  MeshRelaySnapshot,
+  MeshRoleCycleResult,
+  MeshStoreForwardCycleResult,
 } from '../../../api';
 import {
   AUTH_ROLES,
   AuthApi,
+  MeshApi,
   SyncApi,
   getAvailableAuthRoles,
   getDashboardScreenData,
@@ -60,6 +64,7 @@ type LiveNotification = {
 
 const authApi = new AuthApi();
 const syncApi = new SyncApi();
+const meshApi = new MeshApi();
 
 const MAIN_TAB_ITEMS: Array<{
   label: string;
@@ -116,6 +121,15 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
   const [syncingMesh, setSyncingMesh] = useState(false);
   const [lastSyncCycle, setLastSyncCycle] =
     useState<DeltaSyncCycleResult | null>(null);
+  const [evaluatingMeshRole, setEvaluatingMeshRole] = useState(false);
+  const [runningStoreForward, setRunningStoreForward] = useState(false);
+  const [resumingRelay, setResumingRelay] = useState(false);
+  const [meshRoleCycle, setMeshRoleCycle] =
+    useState<MeshRoleCycleResult | null>(null);
+  const [meshStoreForwardCycle, setMeshStoreForwardCycle] =
+    useState<MeshStoreForwardCycleResult | null>(null);
+  const [meshRelaySnapshot, setMeshRelaySnapshot] =
+    useState<MeshRelaySnapshot | null>(null);
   const [resolvingConflictId, setResolvingConflictId] = useState<string | null>(
     null,
   );
@@ -135,6 +149,7 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
   const routeSummary = dashboard.routes[0];
   const supplySummaries = dashboard.supplies.slice(0, 3);
   const nodeSummaries = dashboard.nodeHealth.slice(0, 3);
+  const primaryNodeBatteryPercent = dashboard.nodeHealth[0]?.batteryPercent;
   const triageAlerts = dashboard.triageAlerts.slice(0, 3);
   const allowedScreens = activeSession
     ? ROLE_ALLOWED_SCREENS[activeSession.activeRole]
@@ -228,6 +243,71 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
       setSelectedTab(allowed[0] ?? 'Command');
     }
   }, [activeSession, selectedTab]);
+
+  useEffect(() => {
+    if (!activeSession || selectedTab !== 'Mesh') {
+      return;
+    }
+
+    void refreshMeshSnapshot();
+  }, [activeSession, selectedTab]);
+
+  useEffect(() => {
+    if (!activeSession) {
+      return;
+    }
+
+    let disposed = false;
+
+    const autoEvaluateRole = async () => {
+      try {
+        const batteryBaseline = primaryNodeBatteryPercent ?? 74;
+        const result = await meshApi.evaluateNodeRole({
+          loginData,
+          session: activeSession,
+          batteryPercent: meshThrottleEnabled
+            ? Math.max(18, batteryBaseline - 20)
+            : batteryBaseline,
+          signalStrength: estimateSignalStrength(dashboard),
+          nearbyPeerCount: dashboard.sync.peerCount,
+        });
+
+        if (disposed) {
+          return;
+        }
+
+        setMeshRoleCycle(result);
+
+        if (result.changed) {
+          pushLiveNotification({
+            tone: 'success',
+            title: 'Auto role switch',
+            message: `${result.previousRole ?? 'unknown'} -> ${result.role} · score ${result.relayScore.toFixed(1)}`,
+          });
+          await refreshMeshSnapshot();
+        }
+      } catch {
+        // Automatic role checks should not interrupt the UI workflow.
+      }
+    };
+
+    void autoEvaluateRole();
+    const timerId = setInterval(() => {
+      void autoEvaluateRole();
+    }, 12000);
+
+    return () => {
+      disposed = true;
+      clearInterval(timerId);
+    };
+  }, [
+    activeSession,
+    dashboard.connectivityState,
+    dashboard.sync.peerCount,
+    loginData,
+    meshThrottleEnabled,
+    primaryNodeBatteryPercent,
+  ]);
 
   const remainingSeconds = otpChallenge
     ? Math.max(0, Math.ceil((otpChallenge.expiresAtMs - nowMs) / 1000))
@@ -660,9 +740,201 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
     }
   }
 
-  async function handleRunMeshSync(options: {
-    injectConcurrentPeerMutation: boolean;
+  async function refreshMeshSnapshot() {
+    if (!activeSession) {
+      return;
+    }
+
+    try {
+      const snapshot = await meshApi.getRelaySnapshot({
+        loginData,
+        session: activeSession,
+        limit: 18,
+      });
+      setMeshRelaySnapshot(snapshot);
+    } catch {
+      // Mesh telemetry is best-effort and should not break the screen.
+    }
+  }
+
+  async function handleEvaluateMeshRole() {
+    if (!activeSession) {
+      return;
+    }
+
+    setEvaluatingMeshRole(true);
+
+    try {
+      const batteryBaseline = dashboard.nodeHealth[0]?.batteryPercent ?? 74;
+      const result = await meshApi.evaluateNodeRole({
+        loginData,
+        session: activeSession,
+        batteryPercent: meshThrottleEnabled
+          ? Math.max(18, batteryBaseline - 20)
+          : batteryBaseline,
+        signalStrength: estimateSignalStrength(dashboard),
+        nearbyPeerCount: dashboard.sync.peerCount,
+      });
+
+      setMeshRoleCycle(result);
+      await refreshMeshSnapshot();
+
+      setAuthNotice({
+        tone: result.changed ? 'success' : 'default',
+        title: result.changed ? 'Mesh role switched' : 'Mesh role unchanged',
+        message: `Role ${result.role.toUpperCase()} · score ${result.relayScore.toFixed(1)} · battery ${result.batteryPercent}% · signal ${result.signalStrength}%`,
+      });
+      pushLiveNotification({
+        tone: result.changed ? 'success' : 'default',
+        title: 'Role heuristic evaluated',
+        message: `${result.previousRole ?? 'unknown'} -> ${result.role} · score ${result.relayScore.toFixed(1)}`,
+      });
+    } catch (error) {
+      setAuthNotice({
+        tone: 'danger',
+        title: 'Mesh role evaluation failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Role heuristic execution failed.',
+      });
+      pushLiveNotification({
+        tone: 'danger',
+        title: 'Mesh role evaluation failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Role heuristic execution failed.',
+      });
+    } finally {
+      setEvaluatingMeshRole(false);
+    }
+  }
+
+  async function handleRunStoreForward(options: {
+    relayOnline: boolean;
+    recipientOnline: boolean;
   }) {
+    if (!activeSession) {
+      return;
+    }
+
+    setRunningStoreForward(true);
+
+    try {
+      const cycle = await meshApi.runStoreForwardCycle({
+        loginData,
+        session: activeSession,
+        relayDeviceId: meshRelaySnapshot?.devices.relayDeviceId,
+        recipientDeviceId: meshRelaySnapshot?.devices.recipientDeviceId,
+        relayOnline: options.relayOnline,
+        recipientOnline: options.recipientOnline,
+      });
+
+      setMeshStoreForwardCycle(cycle);
+      await refreshMeshSnapshot();
+
+      const tone: AuthNotice['tone'] = cycle.delivered
+        ? 'success'
+        : cycle.relayStored || !options.relayOnline
+          ? 'warning'
+          : 'default';
+      setAuthNotice({
+        tone,
+        title: cycle.delivered
+          ? 'Store-forward delivered'
+          : 'Store-forward queued',
+        message: `Packet ${cycle.packetId} · sender ${cycle.senderDispatches} · relay ${cycle.relayDispatches} · delivered ${String(cycle.delivered)}`,
+      });
+      pushLiveNotification({
+        tone,
+        title: 'Store-forward cycle executed',
+        message: `relayOnline=${String(options.relayOnline)} · recipientOnline=${String(options.recipientOnline)} · delivered=${String(cycle.delivered)}`,
+      });
+    } catch (error) {
+      setAuthNotice({
+        tone: 'danger',
+        title: 'Store-forward failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Unable to run encrypted store-forward cycle.',
+      });
+      pushLiveNotification({
+        tone: 'danger',
+        title: 'Store-forward failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Unable to run encrypted store-forward cycle.',
+      });
+    } finally {
+      setRunningStoreForward(false);
+    }
+  }
+
+  async function handleResumeRelayForwarding() {
+    if (!activeSession) {
+      return;
+    }
+
+    const relayDeviceId = meshRelaySnapshot?.devices.relayDeviceId;
+    if (!relayDeviceId) {
+      setAuthNotice({
+        tone: 'warning',
+        title: 'No relay node selected',
+        message: 'Evaluate role or run one cycle to discover relay peers.',
+      });
+      return;
+    }
+
+    setResumingRelay(true);
+
+    try {
+      const result = await meshApi.resumeRelayForwarding({
+        senderDeviceId: activeSession.deviceId,
+        relayDeviceId,
+        recipientDeviceId: meshRelaySnapshot?.devices.recipientDeviceId,
+        recipientOnline: true,
+      });
+
+      await refreshMeshSnapshot();
+
+      setAuthNotice({
+        tone: result.delivered ? 'success' : 'default',
+        title: result.delivered
+          ? 'Relay resumed and delivered'
+          : 'Relay resumed',
+        message: `Sender ${result.senderDispatches} · relay ${result.relayDispatches} · delivered ${String(result.delivered)}`,
+      });
+      pushLiveNotification({
+        tone: result.delivered ? 'success' : 'default',
+        title: 'Relay forwarding resumed',
+        message: `sender=${result.senderDispatches} · relay=${result.relayDispatches} · delivered=${String(result.delivered)}`,
+      });
+    } catch (error) {
+      setAuthNotice({
+        tone: 'danger',
+        title: 'Relay resume failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Unable to resume relay forwarding.',
+      });
+      pushLiveNotification({
+        tone: 'danger',
+        title: 'Relay resume failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Unable to resume relay forwarding.',
+      });
+    } finally {
+      setResumingRelay(false);
+    }
+  }
+
+  async function handleRunMeshSync() {
     if (!activeSession) {
       return;
     }
@@ -674,7 +946,7 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
         loginData,
         session: activeSession,
         transport: 'bluetooth_le',
-        injectConcurrentPeerMutation: options.injectConcurrentPeerMutation,
+        listenWindowMs: 5000,
       });
 
       setLastSyncCycle(result);
@@ -735,6 +1007,9 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
     setAuditTerminalLines([]);
     setLiveNotifications([]);
     setLastSyncCycle(null);
+    setMeshRoleCycle(null);
+    setMeshStoreForwardCycle(null);
+    setMeshRelaySnapshot(null);
     setKeySnapshot({
       keyProvisioned: loginData.keyProvisioned,
       keyAlgorithm: loginData.keyAlgorithm,
@@ -1456,8 +1731,11 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
   }
 
   function renderMeshTab() {
-    const meshRole =
-      dashboard.sync.peerCount > 0 ? 'Relay-capable' : 'Client';
+    const meshRoleLabel = meshRoleCycle
+      ? meshRoleCycle.role.toUpperCase()
+      : dashboard.sync.peerCount > 0
+        ? 'RELAY-CAPABLE'
+        : 'CLIENT';
 
     return (
       <View className="gap-3">
@@ -1466,8 +1744,28 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
             This node
           </Text>
           <Text className="mt-2 text-[18px] font-semibold text-[#EEF3FC]">
-            {meshRole}
+            {meshRoleLabel}
           </Text>
+          {meshRoleCycle ? (
+            <View className="mt-3 gap-1">
+              <MeshRow
+                label="Relay score"
+                value={meshRoleCycle.relayScore.toFixed(1)}
+              />
+              <MeshRow
+                label="Battery"
+                value={`${meshRoleCycle.batteryPercent}%`}
+              />
+              <MeshRow
+                label="Signal"
+                value={`${meshRoleCycle.signalStrength}%`}
+              />
+              <MeshRow
+                label="Nearby peers"
+                value={String(meshRoleCycle.nearbyPeerCount)}
+              />
+            </View>
+          ) : null}
         </View>
 
         <View className="rounded-xl border border-[#213350] bg-[#212C40] p-4">
@@ -1504,11 +1802,23 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
 
         <Pressable
           accessibilityRole="button"
+          accessibilityLabel="Evaluate mesh role"
+          disabled={evaluatingMeshRole || !activeSession}
+          onPress={handleEvaluateMeshRole}
+          className={`min-h-[44px] items-center justify-center rounded-lg bg-[#445B2B] px-4 ${
+            evaluatingMeshRole || !activeSession ? 'opacity-60' : ''
+          }`}
+        >
+          <Text className="text-[13px] font-medium text-[#E6F2D8]">
+            {evaluatingMeshRole ? 'Evaluating role…' : 'Evaluate role heuristic'}
+          </Text>
+        </Pressable>
+
+        <Pressable
+          accessibilityRole="button"
           accessibilityLabel="Run delta sync cycle"
           disabled={syncingMesh || !activeSession}
-          onPress={() =>
-            handleRunMeshSync({ injectConcurrentPeerMutation: false })
-          }
+          onPress={handleRunMeshSync}
           className={`min-h-[48px] items-center justify-center rounded-lg bg-[#BFD0F7] px-4 ${
             syncingMesh || !activeSession ? 'opacity-60' : ''
           }`}
@@ -1520,17 +1830,47 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
 
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Run concurrent merge sync cycle"
-          disabled={syncingMesh || !activeSession}
+          accessibilityLabel="Run encrypted store-forward all online"
+          disabled={runningStoreForward || !activeSession}
           onPress={() =>
-            handleRunMeshSync({ injectConcurrentPeerMutation: true })
+            handleRunStoreForward({ relayOnline: true, recipientOnline: true })
           }
-          className={`min-h-[44px] items-center justify-center rounded-lg bg-[#2A3D5D] px-4 ${
-            syncingMesh || !activeSession ? 'opacity-60' : ''
+          className={`min-h-[44px] items-center justify-center rounded-lg bg-[#37635B] px-4 ${
+            runningStoreForward || !activeSession ? 'opacity-60' : ''
           }`}
         >
-          <Text className="text-[13px] font-medium text-[#DFE8FA]">
-            Concurrent merge demo
+          <Text className="text-[13px] font-medium text-[#DDF4ED]">
+            {runningStoreForward ? 'Running…' : 'Run encrypted A->B->C'}
+          </Text>
+        </Pressable>
+
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Run encrypted store-forward with relay offline"
+          disabled={runningStoreForward || !activeSession}
+          onPress={() =>
+            handleRunStoreForward({ relayOnline: false, recipientOnline: true })
+          }
+          className={`min-h-[44px] items-center justify-center rounded-lg bg-[#5F4A1F] px-4 ${
+            runningStoreForward || !activeSession ? 'opacity-60' : ''
+          }`}
+        >
+          <Text className="text-[13px] font-medium text-[#FFE6B8]">
+            Queue while relay offline
+          </Text>
+        </Pressable>
+
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Resume relay forwarding"
+          disabled={resumingRelay || !activeSession}
+          onPress={handleResumeRelayForwarding}
+          className={`min-h-[44px] items-center justify-center rounded-lg bg-[#3C365A] px-4 ${
+            resumingRelay || !activeSession ? 'opacity-60' : ''
+          }`}
+        >
+          <Text className="text-[13px] font-medium text-[#E0DBFF]">
+            {resumingRelay ? 'Resuming…' : 'Resume relay forwarding'}
           </Text>
         </Pressable>
 
@@ -1563,6 +1903,104 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
                 value={`${lastSyncCycle.envelopeSizeBytes} B`}
               />
             </View>
+          </View>
+        ) : null}
+
+        {meshStoreForwardCycle ? (
+          <View className="rounded-xl border border-[#3A4B66] bg-[#18263B] p-4">
+            <Text className="text-[11px] font-semibold uppercase tracking-wider text-[#9AB1D6]">
+              Last store-forward cycle
+            </Text>
+            <View className="mt-2 gap-1">
+              <MeshRow label="Packet" value={meshStoreForwardCycle.packetId} />
+              <MeshRow
+                label="Sender"
+                value={meshStoreForwardCycle.senderDeviceId}
+              />
+              <MeshRow
+                label="Relay"
+                value={meshStoreForwardCycle.relayDeviceId}
+              />
+              <MeshRow
+                label="Recipient"
+                value={meshStoreForwardCycle.recipientDeviceId}
+              />
+              <MeshRow
+                label="Sender dispatches"
+                value={String(meshStoreForwardCycle.senderDispatches)}
+              />
+              <MeshRow
+                label="Relay dispatches"
+                value={String(meshStoreForwardCycle.relayDispatches)}
+              />
+              <MeshRow
+                label="Delivered"
+                value={meshStoreForwardCycle.delivered ? 'yes' : 'no'}
+              />
+              <MeshRow
+                label="Relay stored"
+                value={meshStoreForwardCycle.relayStored ? 'yes' : 'no'}
+              />
+            </View>
+          </View>
+        ) : null}
+
+        {meshRelaySnapshot ? (
+          <View className="rounded-xl border border-[#213350] bg-[#212C40] p-4">
+            <Text className="text-[11px] font-semibold uppercase tracking-wider text-[#7A8BAD]">
+              Relay queue snapshot
+            </Text>
+            <View className="mt-2 gap-1">
+              <MeshRow
+                label="Sender pending"
+                value={String(meshRelaySnapshot.queue.senderPending)}
+              />
+              <MeshRow
+                label="Relay pending"
+                value={String(meshRelaySnapshot.queue.relayPending)}
+              />
+              <MeshRow
+                label="Recipient pending"
+                value={String(meshRelaySnapshot.queue.recipientPending)}
+              />
+            </View>
+          </View>
+        ) : null}
+
+        {meshRelaySnapshot ? (
+          <View className="gap-2 rounded-xl border border-[#20314D] bg-[#182438] p-4">
+            <Text className="text-[11px] font-semibold uppercase tracking-wider text-[#7A8BAD]">
+              Relay logs
+            </Text>
+            <Text className="text-[12px] text-[#8FA0BC]">Sender</Text>
+            {meshRelaySnapshot.logs.sender.slice(0, 4).map(log => (
+              <Text
+                key={`sender-${log.packetId}-${log.occurredAtMs}-${log.action}`}
+                className="text-[11px] text-[#CBD6EB]"
+              >
+                {`${formatZuluTimestamp(log.occurredAtMs)} · ${log.action} · ${log.status}${log.detail ? ` · ${log.detail}` : ''}`}
+              </Text>
+            ))}
+
+            <Text className="mt-2 text-[12px] text-[#8FA0BC]">Relay</Text>
+            {meshRelaySnapshot.logs.relay.slice(0, 4).map(log => (
+              <Text
+                key={`relay-${log.packetId}-${log.occurredAtMs}-${log.action}`}
+                className="text-[11px] text-[#CBD6EB]"
+              >
+                {`${formatZuluTimestamp(log.occurredAtMs)} · ${log.action} · ${log.status}${log.detail ? ` · ${log.detail}` : ''}`}
+              </Text>
+            ))}
+
+            <Text className="mt-2 text-[12px] text-[#8FA0BC]">Recipient</Text>
+            {meshRelaySnapshot.logs.recipient.slice(0, 4).map(log => (
+              <Text
+                key={`recipient-${log.packetId}-${log.occurredAtMs}-${log.action}`}
+                className="text-[11px] text-[#CBD6EB]"
+              >
+                {`${formatZuluTimestamp(log.occurredAtMs)} · ${log.action} · ${log.status}${log.detail ? ` · ${log.detail}` : ''}`}
+              </Text>
+            ))}
           </View>
         ) : null}
 
