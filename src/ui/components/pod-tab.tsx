@@ -12,6 +12,7 @@ import {
 import { WebView } from 'react-native-webview';
 
 import type { RegisteredUser } from '../../api/auth';
+import { getAllUsers } from '../../api/auth';
 import {
   createSignedDelivery,
   getDeliveries,
@@ -21,15 +22,8 @@ import {
   type PodDelivery,
   type PodReceipt,
 } from '../../api/pod';
-import { SYLHET_NODES } from '../../core/routing/engine';
 
 type Props = { user: RegisteredUser };
-
-/** Destination nodes from the routing graph */
-const DESTINATION_NODES = SYLHET_NODES.map(n => ({
-  nodeId: n.nodeId,
-  label: `${n.nodeId} – ${n.displayName}`,
-}));
 
 function buildQrHtml(value: string): string {
   // Fully offline QR code generation using inline qrcode.js algorithm
@@ -289,13 +283,14 @@ export function PodTab({ user }: Props) {
   });
   const [verifyResult, setVerifyResult] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [nearbyUsers, setNearbyUsers] = useState<
+    { id: string; label: string }[]
+  >([]);
 
   // Form state
   const [label, setLabel] = useState('');
   const [cargoDesc, setCargoDesc] = useState('');
-  const [selectedNode, setSelectedNode] = useState(
-    DESTINATION_NODES[0]!.nodeId,
-  );
+  const [selectedRecipient, setSelectedRecipient] = useState('');
 
   const load = useCallback(async () => {
     const [d, r] = await Promise.all([getDeliveries(), getReceipts()]);
@@ -305,11 +300,29 @@ export function PodTab({ user }: Props) {
 
   useEffect(() => {
     load();
-  }, [load]);
+    // Load other registered users as potential nearby recipients
+    getAllUsers().then(users => {
+      const others = users
+        .filter(u => u.userId !== user.userId)
+        .map(u => ({
+          id: u.userId,
+          label: `${u.displayName} (${u.primaryRole})`,
+        }));
+      setNearbyUsers(others);
+      if (others.length > 0 && !selectedRecipient) {
+        setSelectedRecipient(others[0]!.id);
+      }
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [load, user.userId]);
 
   const handleGenerate = async () => {
     if (!label.trim()) {
       Alert.alert('Missing Label', 'Enter a delivery label.');
+      return;
+    }
+    if (!selectedRecipient) {
+      Alert.alert('No Recipient', 'No other users are registered yet.');
       return;
     }
     setLoading(true);
@@ -318,7 +331,7 @@ export function PodTab({ user }: Props) {
       const delivery = await createSignedDelivery(user, {
         label: label.trim(),
         cargoDescription: cargoDesc.trim() || label.trim(),
-        recipientNodeId: selectedNode,
+        recipientId: selectedRecipient,
       });
       setLabel('');
       setCargoDesc('');
@@ -419,40 +432,46 @@ export function PodTab({ user }: Props) {
         <TextInput
           style={styles.input}
           placeholder="Delivery label (e.g. Medical Supplies)"
-          placeholderTextColor="#718096"
+          placeholderTextColor="#9da3b0"
           value={label}
           onChangeText={setLabel}
         />
         <TextInput
           style={styles.input}
           placeholder="Cargo description"
-          placeholderTextColor="#718096"
+          placeholderTextColor="#9da3b0"
           value={cargoDesc}
           onChangeText={setCargoDesc}
         />
-        <Text style={styles.inputLabel}>Recipient Node</Text>
-        <View style={styles.nodeRow}>
-          {DESTINATION_NODES.map(n => (
-            <TouchableOpacity
-              key={n.nodeId}
-              style={[
-                styles.nodeChip,
-                selectedNode === n.nodeId && styles.nodeChipActive,
-              ]}
-              onPress={() => setSelectedNode(n.nodeId)}
-            >
-              <Text
+        <Text style={styles.inputLabel}>Recipient (nearby user)</Text>
+        {nearbyUsers.length === 0 ? (
+          <Text style={styles.emptyHint}>
+            No other users registered on this device.
+          </Text>
+        ) : (
+          <View style={styles.nodeRow}>
+            {nearbyUsers.map(r => (
+              <TouchableOpacity
+                key={r.id}
                 style={[
-                  styles.nodeChipText,
-                  selectedNode === n.nodeId && styles.nodeChipTextActive,
+                  styles.nodeChip,
+                  selectedRecipient === r.id && styles.nodeChipActive,
                 ]}
-                numberOfLines={1}
+                onPress={() => setSelectedRecipient(r.id)}
               >
-                {n.label}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </View>
+                <Text
+                  style={[
+                    styles.nodeChipText,
+                    selectedRecipient === r.id && styles.nodeChipTextActive,
+                  ]}
+                  numberOfLines={1}
+                >
+                  {r.label}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        )}
         <TouchableOpacity
           style={[styles.genBtn, loading && styles.disabled]}
           disabled={loading || !label.trim()}
@@ -527,7 +546,7 @@ export function PodTab({ user }: Props) {
                   nonce: d.nonceHex,
                   timestamp: d.createdAtMs,
                   label: d.label,
-                  recipient_node_id: d.recipientNodeId ?? '',
+                  recipient_id: d.recipientId ?? '',
                   signature: d.signatureHex,
                 });
                 setQrModal({ visible: true, qrJson: payload, label: d.label });
@@ -546,9 +565,7 @@ export function PodTab({ user }: Props) {
               </View>
             </View>
             <Text style={styles.cardMeta}>{d.deliveryId}</Text>
-            <Text style={styles.cardMeta}>
-              → {d.recipientNodeId ?? 'unknown'}
-            </Text>
+            <Text style={styles.cardMeta}>→ {d.recipientId ?? 'unknown'}</Text>
             <Text style={styles.cardHash} numberOfLines={1}>
               hash: {d.payloadHash.slice(0, 20)}…
             </Text>
@@ -602,10 +619,10 @@ export function PodTab({ user }: Props) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0a0e1a' },
+  container: { flex: 1 },
   section: { paddingHorizontal: 12, paddingTop: 10, paddingBottom: 6 },
   sectionTitle: {
-    color: '#90cdf4',
+    color: '#0058be',
     fontWeight: '700',
     fontSize: 13,
     marginBottom: 6,
@@ -613,22 +630,22 @@ const styles = StyleSheet.create({
   },
   row: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
   genBtn: {
-    backgroundColor: '#2d3748',
+    backgroundColor: '#e8eaff',
     borderRadius: 6,
     paddingHorizontal: 10,
     paddingVertical: 7,
     borderWidth: 1,
-    borderColor: '#4a5568',
+    borderColor: '#c2c6d6',
   },
-  genBtnText: { color: '#e2e8f0', fontSize: 11, fontWeight: '600' },
+  genBtnText: { color: '#131b2e', fontSize: 11, fontWeight: '600' },
   actionBtn: {
     borderRadius: 6,
     paddingHorizontal: 12,
     paddingVertical: 8,
     marginRight: 6,
   },
-  verifyBtn: { backgroundColor: '#2b6cb0' },
-  replayBtn: { backgroundColor: '#742a2a' },
+  verifyBtn: { backgroundColor: '#0058be' },
+  replayBtn: { backgroundColor: '#93000a' },
   actionBtnText: { color: '#fff', fontSize: 11, fontWeight: '700' },
   disabled: { opacity: 0.5 },
   resultBadge: {
@@ -636,54 +653,54 @@ const styles = StyleSheet.create({
     borderRadius: 6,
     paddingHorizontal: 12,
     paddingVertical: 8,
-    backgroundColor: '#2d3748',
+    backgroundColor: '#f2f3ff',
   },
-  resultOk: { backgroundColor: '#1a4731' },
-  resultFail: { backgroundColor: '#6b1e1e' },
-  resultBlock: { backgroundColor: '#4a1942' },
-  resultText: { color: '#e2e8f0', fontSize: 12, fontWeight: '700' },
+  resultOk: { backgroundColor: '#d4edda' },
+  resultFail: { backgroundColor: '#fce4ec' },
+  resultBlock: { backgroundColor: '#f3e5f5' },
+  resultText: { color: '#131b2e', fontSize: 12, fontWeight: '700' },
   listScroll: { flex: 1 },
   card: {
-    backgroundColor: '#1a2035',
+    backgroundColor: '#f2f3ff',
     marginHorizontal: 12,
     marginBottom: 8,
     borderRadius: 8,
     padding: 10,
     borderWidth: 1,
-    borderColor: '#2d3748',
+    borderColor: '#c2c6d6',
   },
-  receiptCard: { borderColor: '#4a5568', borderStyle: 'dashed' },
+  receiptCard: { borderColor: '#9da3b0', borderStyle: 'dashed' },
   cardHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     marginBottom: 4,
   },
-  cardTitle: { color: '#e2e8f0', fontSize: 13, fontWeight: '700', flex: 1 },
-  cardMeta: { color: '#718096', fontSize: 10, marginBottom: 1 },
-  cardHash: { color: '#4a5568', fontSize: 9, fontFamily: 'monospace' },
+  cardTitle: { color: '#131b2e', fontSize: 13, fontWeight: '700', flex: 1 },
+  cardMeta: { color: '#565e74', fontSize: 10, marginBottom: 1 },
+  cardHash: { color: '#9da3b0', fontSize: 9, fontFamily: 'monospace' },
   badge: { borderRadius: 4, paddingHorizontal: 6, paddingVertical: 2 },
   badgeText: { color: '#fff', fontSize: 9, fontWeight: '700' },
-  tapHint: { color: '#4299e1', fontSize: 10, marginTop: 4 },
+  tapHint: { color: '#0058be', fontSize: 10, marginTop: 4 },
   bottomPad: { height: 24 },
   // Modal
   modalOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.85)',
+    backgroundColor: 'rgba(0,0,0,0.5)',
     alignItems: 'center',
     justifyContent: 'center',
   },
   modalCard: {
-    backgroundColor: '#1a2035',
+    backgroundColor: '#fff',
     borderRadius: 12,
     padding: 16,
     width: 280,
     alignItems: 'center',
     borderWidth: 1,
-    borderColor: '#4a5568',
+    borderColor: '#c2c6d6',
   },
   modalTitle: {
-    color: '#90cdf4',
+    color: '#0058be',
     fontWeight: '700',
     fontSize: 15,
     marginBottom: 12,
@@ -697,32 +714,32 @@ const styles = StyleSheet.create({
   },
   qrWebView: { flex: 1, backgroundColor: '#fff' },
   qrHint: {
-    color: '#718096',
+    color: '#565e74',
     fontSize: 10,
     marginBottom: 12,
     textAlign: 'center',
   },
   closeBtn: {
-    backgroundColor: '#2d3748',
+    backgroundColor: '#e8eaff',
     borderRadius: 6,
     paddingHorizontal: 20,
     paddingVertical: 8,
   },
-  closeBtnText: { color: '#e2e8f0', fontWeight: '700' },
+  closeBtnText: { color: '#131b2e', fontWeight: '700' },
   // Form styles
   input: {
-    backgroundColor: '#1a2035',
-    color: '#e2e8f0',
+    backgroundColor: '#f2f3ff',
+    color: '#131b2e',
     borderRadius: 6,
     borderWidth: 1,
-    borderColor: '#2d3748',
+    borderColor: '#c2c6d6',
     paddingHorizontal: 10,
     paddingVertical: 8,
     fontSize: 12,
     marginBottom: 8,
   },
   inputLabel: {
-    color: '#718096',
+    color: '#565e74',
     fontSize: 11,
     fontWeight: '600',
     marginBottom: 4,
@@ -730,17 +747,23 @@ const styles = StyleSheet.create({
   },
   nodeRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginBottom: 10 },
   nodeChip: {
-    backgroundColor: '#1a2035',
+    backgroundColor: '#f2f3ff',
     borderRadius: 4,
     paddingHorizontal: 8,
     paddingVertical: 5,
     borderWidth: 1,
-    borderColor: '#2d3748',
+    borderColor: '#c2c6d6',
   },
   nodeChipActive: {
-    borderColor: '#4299e1',
-    backgroundColor: '#2a4365',
+    borderColor: '#0058be',
+    backgroundColor: '#e0ecff',
   },
-  nodeChipText: { color: '#718096', fontSize: 10 },
-  nodeChipTextActive: { color: '#90cdf4', fontWeight: '700' },
+  nodeChipText: { color: '#565e74', fontSize: 10 },
+  nodeChipTextActive: { color: '#0058be', fontWeight: '700' },
+  emptyHint: {
+    color: '#9da3b0',
+    fontSize: 11,
+    fontStyle: 'italic',
+    marginBottom: 8,
+  },
 });

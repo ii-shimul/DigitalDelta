@@ -471,20 +471,6 @@ export function RoutingTab() {
       >
         <Text style={styles.btnSecondaryText}>↺ Reset All Edges to Clear</Text>
       </TouchableOpacity>
-
-      {/* How it works */}
-      <View style={[styles.infoBox, { marginTop: 16 }]}>
-        <Text style={styles.infoTitle}>Demo walkthrough</Text>
-        <Text style={styles.infoText}>
-          {'1. Select Truck → N1→N4: sees road path N1→N2→N4\n\n' +
-            '2. Select Speedboat → N1→N4: uses waterway N1→N3→N4\n\n' +
-            '3. Select Drone → N7→N4: direct airway in 30min\n\n' +
-            '4. Mark E3 (N2→N4) as flooded → truck re-routes\n' +
-            '   via N1→N3→N4 road path automatically\n\n' +
-            '5. Map highlights active route edges in yellow.\n' +
-            '   Re-computation is measured in milliseconds.'}
-        </Text>
-      </View>
     </View>
   );
 }
@@ -684,19 +670,4 @@ const styles = StyleSheet.create({
     borderColor: '#38a169',
   },
   edgeBtnClearText: { color: '#38a169', fontSize: 11, fontWeight: '700' },
-  infoBox: {
-    backgroundColor: '#f0f4ff',
-    borderRadius: 16,
-    padding: 16,
-    borderLeftWidth: 4,
-    borderLeftColor: '#0058be',
-    marginBottom: 20,
-  },
-  infoTitle: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: '#131b2e',
-    marginBottom: 6,
-  },
-  infoText: { fontSize: 12, color: '#565e74', lineHeight: 18 },
 });

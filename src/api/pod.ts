@@ -25,7 +25,7 @@ export type PodDelivery = {
   payloadHash: string;
   senderDeviceId: string;
   senderPubHex: string;
-  recipientNodeId: string | null;
+  recipientId: string | null;
   nonceHex: string;
   signatureHex: string | null;
   createdAtMs: number;
@@ -79,7 +79,7 @@ function rowToDelivery(row: Record<string, unknown>): PodDelivery {
     payloadHash: row.payload_hash as string,
     senderDeviceId: row.sender_device_id as string,
     senderPubHex: row.sender_pub_hex as string,
-    recipientNodeId: (row.recipient_node_id as string | null) ?? null,
+    recipientId: (row.recipient_id as string | null) ?? null,
     nonceHex: row.nonce_hex as string,
     signatureHex: (row.signature_hex as string | null) ?? null,
     createdAtMs: row.created_at_ms as number,
@@ -129,7 +129,7 @@ export async function getReceipts(): Promise<PodReceipt[]> {
  */
 export async function createSignedDelivery(
   user: RegisteredUser,
-  params: { label: string; cargoDescription: string; recipientNodeId: string },
+  params: { label: string; cargoDescription: string; recipientId: string },
 ): Promise<PodDelivery & { qrPayload: string }> {
   const db = await getDatabase();
   const secretKey = await getSecretKey(user);
@@ -144,7 +144,7 @@ export async function createSignedDelivery(
     label: params.label,
     cargoDescription: params.cargoDescription,
     senderPubHex: pubHex,
-    recipientNodeId: params.recipientNodeId,
+    recipientId: params.recipientId,
   });
 
   const signed = signPodPayload(payload, secretKey);
@@ -154,7 +154,7 @@ export async function createSignedDelivery(
   await db.execute(
     `INSERT INTO pod_deliveries
        (delivery_id, label, payload_hash, sender_device_id, sender_pub_hex,
-        recipient_node_id, nonce_hex, signature_hex, created_at_ms, status)
+        recipient_id, nonce_hex, signature_hex, created_at_ms, status)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'signed')`,
     [
       deliveryId,
@@ -162,7 +162,7 @@ export async function createSignedDelivery(
       payload.payload_hash,
       user.deviceId,
       pubHex,
-      params.recipientNodeId,
+      params.recipientId,
       payload.nonce,
       signed.signature,
       nowMs,
@@ -178,7 +178,7 @@ export async function createSignedDelivery(
     payloadHash: payload.payload_hash,
     senderDeviceId: user.deviceId,
     senderPubHex: pubHex,
-    recipientNodeId: params.recipientNodeId,
+    recipientId: params.recipientId,
     nonceHex: payload.nonce,
     signatureHex: signed.signature,
     createdAtMs: nowMs,
@@ -320,7 +320,7 @@ export async function getLastSignedQrForReplay(): Promise<string | null> {
   const db = await getDatabase();
   const r = await db.execute(
     `SELECT d.delivery_id, d.label, d.payload_hash, d.sender_pub_hex,
-            d.nonce_hex, d.signature_hex, d.recipient_node_id, d.created_at_ms
+            d.nonce_hex, d.signature_hex, d.recipient_id, d.created_at_ms
      FROM pod_deliveries d
      WHERE d.signature_hex IS NOT NULL
      ORDER BY d.created_at_ms DESC LIMIT 1`,
@@ -337,7 +337,7 @@ export async function getLastSignedQrForReplay(): Promise<string | null> {
     nonce: row.nonce_hex as string,
     timestamp: row.created_at_ms as number,
     label: row.label as string,
-    recipient_node_id: (row.recipient_node_id as string | null) ?? '',
+    recipient_id: (row.recipient_id as string | null) ?? '',
     signature: row.signature_hex as string,
   };
   return JSON.stringify(payload);

@@ -250,6 +250,20 @@ export async function verifyAuditTrail(): Promise<AuditChainVerificationResult> 
   return svc.verifyAuditTrail();
 }
 
+export async function getAllUsers(): Promise<
+  { userId: string; displayName: string; primaryRole: string }[]
+> {
+  const db = await getDatabase();
+  const r = await db.execute(
+    "SELECT user_id, display_name, primary_role FROM users WHERE status = 'active' ORDER BY display_name ASC",
+  );
+  return r.rows.map(row => ({
+    userId: row.user_id as string,
+    displayName: row.display_name as string,
+    primaryRole: row.primary_role as string,
+  }));
+}
+
 export async function getAuditLogCount(): Promise<number> {
   const db = await getDatabase();
   const result = await db.execute('SELECT COUNT(*) as cnt FROM auth_audit_log');

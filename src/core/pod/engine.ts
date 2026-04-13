@@ -18,7 +18,7 @@ export type PodPayload = {
   nonce: string; // 16-byte hex, single-use
   timestamp: number; // ms since epoch
   label: string; // human-readable cargo label
-  recipient_node_id: string;
+  recipient_id: string; // nearby user/camp personnel ID
 };
 
 export type SignedPodPayload = PodPayload & {
@@ -91,7 +91,7 @@ export async function buildPodPayload(params: {
   label: string;
   cargoDescription: string;
   senderPubHex: string;
-  recipientNodeId: string;
+  recipientId: string;
 }): Promise<PodPayload> {
   const payloadHash = await computeSha256Hex(params.cargoDescription);
   return {
@@ -101,6 +101,6 @@ export async function buildPodPayload(params: {
     nonce: bytesToHex(randomBytes(16)),
     timestamp: Date.now(),
     label: params.label,
-    recipient_node_id: params.recipientNodeId,
+    recipient_id: params.recipientId,
   };
 }

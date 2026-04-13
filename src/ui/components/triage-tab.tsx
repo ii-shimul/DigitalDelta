@@ -360,21 +360,6 @@ export function TriageTab({ user }: Props) {
           ))}
         </View>
       )}
-
-      {/* How it works */}
-      <View style={styles.infoBox}>
-        <Text style={styles.infoTitle}>Demo walkthrough</Text>
-        <Text style={styles.infoText}>
-          {'1. Observe 4 cargo items at P0–P3 with different SLA windows\n\n' +
-            '2. Tap "+30% Slow" — P2/P3 cargo moves to At Risk\n\n' +
-            '3. Tap "+60% Slow" — P2/P3 breach; P0/P1 go At Risk\n\n' +
-            '4. Tap "Run Autonomous Triage" — engine decides:\n' +
-            '   • P0/P1 → Reroute with priority\n' +
-            '   • P2/P3 → Drop at safe waypoint\n\n' +
-            '5. Check the Audit tab — each decision is hash-chained\n' +
-            '   into the immutable log for non-repudiation.'}
-        </Text>
-      </View>
     </View>
   );
 }
@@ -595,21 +580,6 @@ const styles = StyleSheet.create({
   decisionBadge: { borderRadius: 6, paddingHorizontal: 8, paddingVertical: 3 },
   decisionType: { fontSize: 10, fontWeight: '800', letterSpacing: 0.5 },
   rationaleText: { fontSize: 12, color: '#565e74', lineHeight: 17 },
-  infoBox: {
-    backgroundColor: '#fff5f5',
-    borderRadius: 16,
-    padding: 16,
-    borderLeftWidth: 4,
-    borderLeftColor: '#e53e3e',
-    marginBottom: 20,
-  },
-  infoTitle: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: '#131b2e',
-    marginBottom: 6,
-  },
-  infoText: { fontSize: 12, color: '#565e74', lineHeight: 18 },
   formInput: {
     backgroundColor: '#fff',
     borderRadius: 8,

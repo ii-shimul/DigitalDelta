@@ -12,7 +12,7 @@ export const podMigration: Migration = {
         payload_hash    TEXT NOT NULL,
         sender_device_id   TEXT NOT NULL,
         sender_pub_hex     TEXT NOT NULL,
-        recipient_node_id  TEXT,
+        recipient_id       TEXT,
         nonce_hex       TEXT NOT NULL,
         signature_hex   TEXT,
         created_at_ms   INTEGER NOT NULL,

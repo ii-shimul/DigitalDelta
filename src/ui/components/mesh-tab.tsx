@@ -354,22 +354,6 @@ export function MeshTab({ user }: Props) {
           ))}
         </View>
       )}
-
-      {/* How it works */}
-      <View style={styles.infoBox}>
-        <Text style={styles.infoTitle}>Demo walkthrough</Text>
-        <Text style={styles.infoText}>
-          {'1. Type a message → "Encrypt & Send" (→ Self)\n' +
-            '   Stored as PENDING with ciphertext only\n\n' +
-            '2. "Simulate Relay Hop" — a virtual relay device\n' +
-            '   picks up PENDING messages, decrements TTL,\n' +
-            '   marks IN_TRANSIT. Relay cannot read payload.\n\n' +
-            '3. "Deliver to Self" — decrypts with your X25519 key\n' +
-            '   derived from your Ed25519 seed. Relay has no key.\n\n' +
-            '4. Tap role presets to simulate role switching.\n' +
-            '   Each switch is logged with battery & signal context.'}
-        </Text>
-      </View>
     </View>
   );
 }
@@ -620,19 +604,4 @@ const styles = StyleSheet.create({
   roleDot: { width: 8, height: 8, borderRadius: 4 },
   logRole: { fontSize: 11, fontWeight: '800', color: '#131b2e' },
   logReason: { flex: 1, fontSize: 11, color: '#565e74', lineHeight: 16 },
-  infoBox: {
-    backgroundColor: '#f2f3ff',
-    borderRadius: 16,
-    padding: 16,
-    borderLeftWidth: 4,
-    borderLeftColor: '#0058be',
-    marginBottom: 20,
-  },
-  infoTitle: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: '#131b2e',
-    marginBottom: 6,
-  },
-  infoText: { fontSize: 12, color: '#565e74', lineHeight: 18 },
 });

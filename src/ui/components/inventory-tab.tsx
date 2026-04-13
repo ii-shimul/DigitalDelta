@@ -465,20 +465,6 @@ export function InventoryTab({ user }: Props) {
             {syncing ? 'Syncing...' : '⟳ Simulate Sync from Remote Device'}
           </Text>
         </TouchableOpacity>
-
-        <View style={styles.infoBox}>
-          <Text style={styles.infoTitle}>How to demo M2</Text>
-          <Text style={styles.infoText}>
-            {'1. Load demo data or add items manually\n' +
-              '2. Use ＋/− to mutate quantities (ticks the vector clock)\n' +
-              '3. Tap "Simulate Sync" — a fake remote device sends its delta\n' +
-              '4. The CRDT engine classifies each item:\n' +
-              '   • Local Wins: your clock is strictly ahead\n' +
-              '   • Remote Wins: remote clock is strictly ahead\n' +
-              '   • Conflict: concurrent edits — resolve manually above\n' +
-              '5. Resolving a conflict merges the vector clocks'}
-          </Text>
-        </View>
       </View>
     </View>
   );
@@ -875,23 +861,5 @@ const styles = StyleSheet.create({
   },
   chipTextSelected: {
     color: '#fff',
-  },
-  infoBox: {
-    backgroundColor: '#f2f3ff',
-    borderRadius: 16,
-    padding: 16,
-    borderLeftWidth: 4,
-    borderLeftColor: '#0058be',
-  },
-  infoTitle: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: '#131b2e',
-    marginBottom: 6,
-  },
-  infoText: {
-    fontSize: 12,
-    color: '#565e74',
-    lineHeight: 18,
   },
 });

@@ -16,6 +16,7 @@ import {
   injectAuditCorruption,
   verifyAuditTrail,
 } from '../../api/auth';
+import { getConflicts } from '../../api/inventory';
 import { InventoryTab } from '../components/inventory-tab';
 import { FleetTab } from '../components/fleet-tab';
 import { MeshTab } from '../components/mesh-tab';
@@ -23,6 +24,7 @@ import { PodTab } from '../components/pod-tab';
 import { RoutingTab } from '../components/routing-tab';
 import { TriageTab } from '../components/triage-tab';
 import type {
+  AppRole,
   AuditChainVerificationResult,
   DeviceIdentityRecord,
 } from '../../core/contracts';
@@ -51,6 +53,91 @@ type Tab =
   | 'pod'
   | 'fleet';
 
+/** RBAC — tabs each role can access (mission + identity are universal) */
+const ROLE_TAB_ACCESS: Record<AppRole, readonly Tab[]> = {
+  FIELD_VOLUNTEER: [
+    'mission',
+    'identity',
+    'audit',
+    'inventory',
+    'mesh',
+    'routing',
+    'pod',
+  ],
+  SUPPLY_MANAGER: [
+    'mission',
+    'identity',
+    'audit',
+    'inventory',
+    'mesh',
+    'triage',
+    'routing',
+    'pod',
+  ],
+  DRONE_OPERATOR: [
+    'mission',
+    'identity',
+    'audit',
+    'mesh',
+    'routing',
+    'pod',
+    'fleet',
+  ],
+  CAMP_COMMANDER: [
+    'mission',
+    'identity',
+    'audit',
+    'inventory',
+    'routing',
+    'pod',
+    'triage',
+  ],
+  SYNC_ADMIN: [
+    'mission',
+    'identity',
+    'audit',
+    'inventory',
+    'mesh',
+    'triage',
+    'routing',
+    'pod',
+    'fleet',
+  ],
+};
+
+/** A5 — System state shown across all tabs */
+type SystemState = 'offline' | 'syncing' | 'conflict' | 'verified';
+
+const STATE_META: Record<
+  SystemState,
+  { label: string; color: string; bg: string; dot: string }
+> = {
+  offline: {
+    label: 'Offline',
+    color: '#565e74',
+    bg: '#f2f3ff',
+    dot: '#9da3b0',
+  },
+  syncing: {
+    label: 'Syncing…',
+    color: '#0058be',
+    bg: '#e0ecff',
+    dot: '#3182ce',
+  },
+  conflict: {
+    label: 'Conflict Detected',
+    color: '#93000a',
+    bg: '#ffdad6',
+    dot: '#e53e3e',
+  },
+  verified: {
+    label: 'Verified',
+    color: '#006947',
+    bg: '#d4edda',
+    dot: '#38a169',
+  },
+};
+
 export default function HomeScreen({ user, onLogout }: Props) {
   const [activeTab, setActiveTab] = useState<Tab>('mission');
   const [deviceIdentity, setDeviceIdentity] =
@@ -60,12 +147,48 @@ export default function HomeScreen({ user, onLogout }: Props) {
   const [auditCount, setAuditCount] = useState(0);
   const [auditLoading, setAuditLoading] = useState(false);
 
+  const allowedTabs =
+    ROLE_TAB_ACCESS[user.role] ?? ROLE_TAB_ACCESS.FIELD_VOLUNTEER;
+  const canAccess = (tab: Tab) => allowedTabs.includes(tab);
+
+  // A5 — dynamic system state for the persistent banner
+  const [systemState, setSystemState] = useState<SystemState>('offline');
+  const [conflictCount, setConflictCount] = useState(0);
+
   useEffect(() => {
     if (user.deviceId) {
       getDeviceIdentity(user.deviceId).then(setDeviceIdentity);
     }
     getAuditLogCount().then(setAuditCount);
   }, [user.deviceId]);
+
+  // Poll for conflicts and audit to update the state banner
+  useEffect(() => {
+    let active = true;
+    const poll = async () => {
+      try {
+        const conflicts = await getConflicts();
+        if (!active) return;
+        const count = conflicts.filter(c => !c.resolvedAtMs).length;
+        setConflictCount(count);
+        if (count > 0) {
+          setSystemState('conflict');
+        } else if (auditResult?.valid) {
+          setSystemState('verified');
+        } else {
+          setSystemState('offline');
+        }
+      } catch {
+        // ignore polling errors
+      }
+    };
+    poll();
+    const id = setInterval(poll, 5000);
+    return () => {
+      active = false;
+      clearInterval(id);
+    };
+  }, [auditResult]);
 
   const handleVerifyAudit = useCallback(async () => {
     setAuditLoading(true);
@@ -117,13 +240,49 @@ export default function HomeScreen({ user, onLogout }: Props) {
   return (
     <SafeAreaView style={styles.container}>
       {/* Top Bar */}
-      <View style={styles.topBar}>
+      <View style={styles.topBar} accessibilityRole="header">
         <View style={styles.topBarLeft}>
-          <Text style={styles.brandText}>Digital Delta</Text>
+          <Text style={styles.brandText} accessibilityRole="header">
+            Digital Delta
+          </Text>
         </View>
-        <TouchableOpacity style={styles.logoutBtn} onPress={onLogout}>
+        <TouchableOpacity
+          style={styles.logoutBtn}
+          onPress={onLogout}
+          accessibilityRole="button"
+          accessibilityLabel="Log out"
+        >
           <Text style={styles.logoutText}>Logout</Text>
         </TouchableOpacity>
+      </View>
+
+      {/* A5 — Persistent system state banner */}
+      <View
+        style={[
+          styles.stateBanner,
+          { backgroundColor: STATE_META[systemState].bg },
+        ]}
+        accessibilityRole="alert"
+        accessibilityLabel={`System state: ${STATE_META[systemState].label}${
+          conflictCount > 0 ? `, ${conflictCount} conflicts` : ''
+        }`}
+      >
+        <View
+          style={[
+            styles.stateDot,
+            { backgroundColor: STATE_META[systemState].dot },
+          ]}
+        />
+        <Text
+          style={[styles.stateLabel, { color: STATE_META[systemState].color }]}
+        >
+          {STATE_META[systemState].label}
+        </Text>
+        {conflictCount > 0 && (
+          <View style={styles.conflictBadge}>
+            <Text style={styles.conflictBadgeText}>{conflictCount}</Text>
+          </View>
+        )}
       </View>
 
       {/* Main Content */}
@@ -134,61 +293,92 @@ export default function HomeScreen({ user, onLogout }: Props) {
         {activeTab === 'mission' && renderMission()}
         {activeTab === 'identity' && renderIdentity()}
         {activeTab === 'audit' && renderAudit()}
-        {activeTab === 'inventory' && <InventoryTab user={user} />}
-        {activeTab === 'mesh' && <MeshTab user={user} />}
-        {activeTab === 'triage' && <TriageTab user={user} />}
-        {activeTab === 'routing' && <RoutingTab />}
-        {activeTab === 'pod' && <PodTab user={user} />}
-        {activeTab === 'fleet' && <FleetTab user={user} />}
+        {activeTab === 'inventory' && canAccess('inventory') && (
+          <InventoryTab user={user} />
+        )}
+        {activeTab === 'mesh' && canAccess('mesh') && <MeshTab user={user} />}
+        {activeTab === 'triage' && canAccess('triage') && (
+          <TriageTab user={user} />
+        )}
+        {activeTab === 'routing' && canAccess('routing') && <RoutingTab />}
+        {activeTab === 'pod' && canAccess('pod') && <PodTab user={user} />}
+        {activeTab === 'fleet' && canAccess('fleet') && (
+          <FleetTab user={user} />
+        )}
       </ScrollView>
 
-      {/* Bottom Nav */}
+      {/* Bottom Nav — filtered by RBAC */}
       <View style={styles.bottomNav}>
-        <TabButton
-          label="Mission"
-          active={activeTab === 'mission'}
-          onPress={() => setActiveTab('mission')}
-        />
-        <TabButton
-          label="Identity"
-          active={activeTab === 'identity'}
-          onPress={() => setActiveTab('identity')}
-        />
-        <TabButton
-          label="Inventory"
-          active={activeTab === 'inventory'}
-          onPress={() => setActiveTab('inventory')}
-        />
-        <TabButton
-          label="Audit"
-          active={activeTab === 'audit'}
-          onPress={() => setActiveTab('audit')}
-        />
-        <TabButton
-          label="Mesh"
-          active={activeTab === 'mesh'}
-          onPress={() => setActiveTab('mesh')}
-        />
-        <TabButton
-          label="Triage"
-          active={activeTab === 'triage'}
-          onPress={() => setActiveTab('triage')}
-        />
-        <TabButton
-          label="Routes"
-          active={activeTab === 'routing'}
-          onPress={() => setActiveTab('routing')}
-        />
-        <TabButton
-          label="PoD"
-          active={activeTab === 'pod'}
-          onPress={() => setActiveTab('pod')}
-        />
-        <TabButton
-          label="Fleet"
-          active={activeTab === 'fleet'}
-          onPress={() => setActiveTab('fleet')}
-        />
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.bottomNavContent}
+          accessibilityRole="tablist"
+        >
+          {canAccess('mission') && (
+            <TabButton
+              label="Mission"
+              active={activeTab === 'mission'}
+              onPress={() => setActiveTab('mission')}
+            />
+          )}
+          {canAccess('identity') && (
+            <TabButton
+              label="Identity"
+              active={activeTab === 'identity'}
+              onPress={() => setActiveTab('identity')}
+            />
+          )}
+          {canAccess('inventory') && (
+            <TabButton
+              label="Inventory"
+              active={activeTab === 'inventory'}
+              onPress={() => setActiveTab('inventory')}
+            />
+          )}
+          {canAccess('audit') && (
+            <TabButton
+              label="Audit"
+              active={activeTab === 'audit'}
+              onPress={() => setActiveTab('audit')}
+            />
+          )}
+          {canAccess('mesh') && (
+            <TabButton
+              label="Mesh"
+              active={activeTab === 'mesh'}
+              onPress={() => setActiveTab('mesh')}
+            />
+          )}
+          {canAccess('triage') && (
+            <TabButton
+              label="Triage"
+              active={activeTab === 'triage'}
+              onPress={() => setActiveTab('triage')}
+            />
+          )}
+          {canAccess('routing') && (
+            <TabButton
+              label="Routes"
+              active={activeTab === 'routing'}
+              onPress={() => setActiveTab('routing')}
+            />
+          )}
+          {canAccess('pod') && (
+            <TabButton
+              label="PoD"
+              active={activeTab === 'pod'}
+              onPress={() => setActiveTab('pod')}
+            />
+          )}
+          {canAccess('fleet') && (
+            <TabButton
+              label="Fleet"
+              active={activeTab === 'fleet'}
+              onPress={() => setActiveTab('fleet')}
+            />
+          )}
+        </ScrollView>
       </View>
     </SafeAreaView>
   );
@@ -364,6 +554,8 @@ export default function HomeScreen({ user, onLogout }: Props) {
             style={[styles.button, auditLoading && styles.buttonDisabled]}
             onPress={handleVerifyAudit}
             disabled={auditLoading}
+            accessibilityRole="button"
+            accessibilityLabel="Verify audit trail integrity"
           >
             <Text style={styles.buttonText}>
               {auditLoading ? 'Verifying...' : 'Verify Audit Trail'}
@@ -373,6 +565,8 @@ export default function HomeScreen({ user, onLogout }: Props) {
           <TouchableOpacity
             style={styles.dangerButton}
             onPress={handleInjectCorruption}
+            accessibilityRole="button"
+            accessibilityLabel="Inject audit corruption for tamper detection demo"
           >
             <Text style={styles.dangerButtonText}>
               Inject Corruption (Demo)
@@ -412,6 +606,9 @@ function TabButton({
       style={[styles.tabBtn, active && styles.tabBtnActive]}
       onPress={onPress}
       activeOpacity={0.7}
+      accessibilityRole="tab"
+      accessibilityState={{ selected: active }}
+      accessibilityLabel={`${label} tab`}
     >
       <Text style={[styles.tabLabel, active && styles.tabLabelActive]}>
         {label}
@@ -483,6 +680,38 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#faf8ff',
+  },
+  // A5 — State banner
+  stateBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 24,
+    paddingVertical: 8,
+    gap: 8,
+  },
+  stateDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+  },
+  stateLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+  },
+  conflictBadge: {
+    backgroundColor: '#e53e3e',
+    borderRadius: 10,
+    minWidth: 20,
+    height: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 6,
+  },
+  conflictBadgeText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: '800',
   },
   topBar: {
     flexDirection: 'row',
@@ -795,18 +1024,21 @@ const styles = StyleSheet.create({
     bottom: 0,
     left: 0,
     right: 0,
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    alignItems: 'center',
-    paddingVertical: 12,
-    paddingBottom: 24,
     backgroundColor: 'rgba(250,248,255,0.95)',
     borderTopWidth: 1,
     borderTopColor: 'rgba(19,27,46,0.1)',
+    paddingBottom: 24,
+  },
+  bottomNavContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 8,
+    gap: 4,
   },
   tabBtn: {
     alignItems: 'center',
-    paddingHorizontal: 20,
+    paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 12,
   },
