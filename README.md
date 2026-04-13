@@ -1,97 +1,115 @@
-This is a new [**React Native**](https://reactnative.dev) project, bootstrapped using [`@react-native-community/cli`](https://github.com/react-native-community/cli).
+# Digital Delta
 
-# Getting Started
+Offline-first resilient logistics and mesh triage engine for flood-response scenarios.
 
-> **Note**: Make sure you have completed the [Set Up Your Environment](https://reactnative.dev/docs/set-up-your-environment) guide before proceeding.
+The app is built for high-disruption operations where internet, roads, and power can fail at the same time. Core workflows continue locally, then reconcile when peer connectivity is available.
 
-## Step 1: Start Metro
+## What This Prototype Demonstrates
 
-First, you will need to run **Metro**, the JavaScript build tool for React Native.
+- Persistent operational state UX: offline, syncing, conflict, verified.
+- Offline OTP and device-bound identity with role-based access control.
+- Conflict-tolerant local inventory updates with causal metadata.
+- BLE-based delta sync transport with Protobuf payload encoding.
+- Store-and-forward mesh messaging with TTL and end-to-end encryption.
+- Dynamic multi-modal routing with edge failure injection and recomputation.
+- Cryptographically verified proof-of-delivery handshake with replay protection.
+- Autonomous triage decisions and drone handoff orchestration.
 
-To start the Metro dev server, run the following command from the root of your React Native project:
+## Repository Layout
+
+- App code: src
+- Protocol schemas: proto
+- Platform folders: android, ios
+- Project requirements and judging context: requirement.md
+- Demo walkthrough script: DEMO.md
+
+## Architecture and Data Contracts
+
+- The protocol contract root is proto/digital_delta.proto.
+- Supporting schemas are in proto/auth.proto, proto/mesh.proto, proto/routing.proto, proto/triage.proto, proto/pod.proto, proto/fleet.proto, proto/sync.proto, proto/ledger.proto, proto/identity.proto, and proto/common.proto.
+- BLE sync transport uses Protobuf messages for delta exchange.
+
+## Prerequisites
+
+- Node.js 22.11.0 or newer
+- React Native Android/iOS toolchain (Android Studio and/or Xcode)
+- Java and Android SDK configured for React Native
+- CocoaPods for iOS builds
+
+## Setup
+
+1. Install dependencies:
 
 ```sh
-# Using npm
-npm start
-
-# OR using Yarn
-yarn start
+pnpm install
 ```
 
-## Step 2: Build and run your app
-
-With Metro running, open a new terminal window/pane from the root of your React Native project, and use one of the following commands to build and run your Android or iOS app:
-
-### Android
+If you prefer npm:
 
 ```sh
-# Using npm
-npm run android
-
-# OR using Yarn
-yarn android
+npm install
 ```
 
-### iOS
-
-For iOS, remember to install CocoaPods dependencies (this only needs to be run on first clone or after updating native deps).
-
-The first time you create a new project, run the Ruby bundler to install CocoaPods itself:
+2. iOS only (first time or native dependency updates):
 
 ```sh
 bundle install
-```
-
-Then, and every time you update your native dependencies, run:
-
-```sh
 bundle exec pod install
 ```
 
-For more information, please visit [CocoaPods Getting Started guide](https://guides.cocoapods.org/using/getting-started.html).
+## Run the App
+
+Start Metro:
 
 ```sh
-# Using npm
-npm run ios
-
-# OR using Yarn
-yarn ios
+pnpm start
 ```
 
-If everything is set up correctly, you should see your new app running in the Android Emulator, iOS Simulator, or your connected device.
+Android:
 
-This is one way to run your app — you can also build it directly from Android Studio or Xcode.
+```sh
+pnpm android
+```
 
-## Step 3: Modify your app
+iOS:
 
-Now that you have successfully run the app, let's make changes!
+```sh
+pnpm ios
+```
 
-Open `App.tsx` in your text editor of choice and make some changes. When you save, your app will automatically update and reflect these changes — this is powered by [Fast Refresh](https://reactnative.dev/docs/fast-refresh).
+## Quality Checks
 
-When you want to forcefully reload, for example to reset the state of your app, you can perform a full reload:
+Lint:
 
-- **Android**: Press the <kbd>R</kbd> key twice or select **"Reload"** from the **Dev Menu**, accessed via <kbd>Ctrl</kbd> + <kbd>M</kbd> (Windows/Linux) or <kbd>Cmd ⌘</kbd> + <kbd>M</kbd> (macOS).
-- **iOS**: Press <kbd>R</kbd> in iOS Simulator.
+```sh
+pnpm lint
+```
 
-## Congratulations! :tada:
+Tests:
 
-You've successfully run and modified your React Native App. :partying_face:
+```sh
+pnpm test
+```
 
-### Now what?
+## Demo Execution
 
-- If you want to add this new React Native code to an existing application, check out the [Integration guide](https://reactnative.dev/docs/integration-with-existing-apps).
-- If you're curious to learn more about React Native, check out the [docs](https://reactnative.dev/docs/getting-started).
+Use DEMO.md for a timed 10-minute walkthrough that covers:
 
-# Troubleshooting
+- offline + sync behavior
+- route recalculation under failure injection
+- proof-of-delivery verification flow
+- triage preemption behavior
+- drone handoff flow
 
-If you're having issues getting the above steps to work, see the [Troubleshooting](https://reactnative.dev/docs/troubleshooting) page.
+## Deliverables Mapping
 
-# Learn More
+For submission readiness:
 
-To learn more about React Native, take a look at the following resources:
+- D1: This repository contains source code, setup instructions (this README), protocol schemas, and DEMO.md.
+- D2: Demo flow is documented in DEMO.md.
+- D3: Architecture references are provided via schema package layout in proto.
+- D5: Pitch deck should be based on implemented features in this pull.
 
-- [React Native Website](https://reactnative.dev) - learn more about React Native.
-- [Getting Started](https://reactnative.dev/docs/environment-setup) - an **overview** of React Native and how setup your environment.
-- [Learn the Basics](https://reactnative.dev/docs/getting-started) - a **guided tour** of the React Native **basics**.
-- [Blog](https://reactnative.dev/blog) - read the latest official React Native **Blog** posts.
-- [`@facebook/react-native`](https://github.com/facebook/react-native) - the Open Source; GitHub **repository** for React Native.
+## Scope Note
+
+Predictive ML model training and reporting is not part of the current demo scope. Routing risk handling can still consume high-risk edge status when present.
