@@ -23,7 +23,12 @@ import type {
   AuthenticatedSession,
   DeltaSyncCycleResult,
   DashboardScreenData,
+  FleetDroneRequiredZoneSummary,
+  FleetHandoffEventSummary,
+  FleetHandoffTransferSummary,
+  FleetRendezvousPlanSummary,
   LoginScreenData,
+  MeshThrottleSimulationResult,
   MeshRelaySnapshot,
   PodChallengeEnvelope,
   PodReceiptData,
@@ -37,6 +42,7 @@ import type {
 import {
   AUTH_ROLES,
   AuthApi,
+  FleetApi,
   MeshApi,
   PodApi,
   RoutingApi,
@@ -73,6 +79,7 @@ type LiveNotification = {
 const authApi = new AuthApi();
 const syncApi = new SyncApi();
 const meshApi = new MeshApi();
+const fleetApi = new FleetApi();
 const routingApi = new RoutingApi();
 const podApi = new PodApi();
 
@@ -146,6 +153,21 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
     useState<MeshStoreForwardCycleResult | null>(null);
   const [meshRelaySnapshot, setMeshRelaySnapshot] =
     useState<MeshRelaySnapshot | null>(null);
+  const [meshStationaryMode, setMeshStationaryMode] = useState(true);
+  const [meshThrottleSimulation, setMeshThrottleSimulation] =
+    useState<MeshThrottleSimulationResult | null>(null);
+  const [simulatingMeshThrottle, setSimulatingMeshThrottle] = useState(false);
+  const [droneRequiredZones, setDroneRequiredZones] = useState<
+    FleetDroneRequiredZoneSummary[]
+  >([]);
+  const [computingHandoffPlan, setComputingHandoffPlan] = useState(false);
+  const [executingHandoff, setExecutingHandoff] = useState(false);
+  const [handoffPlan, setHandoffPlan] =
+    useState<FleetRendezvousPlanSummary | null>(null);
+  const [handoffTransfer, setHandoffTransfer] =
+    useState<FleetHandoffTransferSummary | null>(null);
+  const [latestHandoffEvent, setLatestHandoffEvent] =
+    useState<FleetHandoffEventSummary | null>(null);
   const [routingOverview, setRoutingOverview] =
     useState<RoutingOverview | null>(null);
   const [lastRoutingRecompute, setLastRoutingRecompute] =
@@ -179,6 +201,9 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
   const nodeSummaries = dashboard.nodeHealth.slice(0, 3);
   const primaryNodeBatteryPercent = dashboard.nodeHealth[0]?.batteryPercent;
   const triageAlerts = dashboard.triageAlerts.slice(0, 3);
+  const activeDroneRequiredZone = scannerDeliveryId
+    ? droneRequiredZones.find(zone => zone.deliveryId === scannerDeliveryId)
+    : undefined;
   const allowedScreens = activeSession
     ? ROLE_ALLOWED_SCREENS[activeSession.activeRole]
     : [];
@@ -317,6 +342,74 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
 
     void refreshLatestPodReceipt(scannerDeliveryId);
   }, [activeSession, scannerDeliveryId]);
+
+  useEffect(() => {
+    if (!activeSession) {
+      setDroneRequiredZones([]);
+      return;
+    }
+
+    let disposed = false;
+
+    const refreshDroneRequiredZones = async () => {
+      try {
+        const zones = await fleetApi.analyzeDroneRequiredZones({
+          loginData,
+          session: activeSession,
+        });
+
+        if (disposed) {
+          return;
+        }
+
+        setDroneRequiredZones(zones);
+      } catch {
+        // Reachability scan is best-effort and should not block other panels.
+      }
+    };
+
+    void refreshDroneRequiredZones();
+    const timerId = setInterval(refreshDroneRequiredZones, 12_000);
+
+    return () => {
+      disposed = true;
+      clearInterval(timerId);
+    };
+  }, [activeSession, loginData]);
+
+  useEffect(() => {
+    if (!activeSession || !scannerDeliveryId) {
+      setLatestHandoffEvent(null);
+      setHandoffPlan(null);
+      setHandoffTransfer(null);
+      return;
+    }
+
+    let disposed = false;
+
+    const refreshLatestHandoffEvent = async () => {
+      try {
+        const event = await fleetApi.getLatestHandoffEvent({
+          loginData,
+          session: activeSession,
+          deliveryId: scannerDeliveryId,
+        });
+        if (disposed) {
+          return;
+        }
+
+        setLatestHandoffEvent(event);
+      } catch {
+        // Handoff panel can continue without latest event details.
+      }
+    };
+
+    void refreshLatestHandoffEvent();
+
+    return () => {
+      disposed = true;
+    };
+  }, [activeSession, loginData, scannerDeliveryId]);
 
   useEffect(() => {
     if (!activeSession) {
@@ -1017,6 +1110,190 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
     }
   }
 
+  async function handleSimulateMeshThrottle() {
+    if (!activeSession) {
+      return;
+    }
+
+    setSimulatingMeshThrottle(true);
+
+    try {
+      const batteryBaseline = dashboard.nodeHealth[0]?.batteryPercent ?? 74;
+      const simulation = await meshApi.simulateBatteryAwareThrottle({
+        loginData,
+        session: activeSession,
+        batteryPercent: meshThrottleEnabled
+          ? Math.min(28, batteryBaseline)
+          : batteryBaseline,
+        signalStrength: estimateSignalStrength(dashboard),
+        nearbyPeerCount: dashboard.sync.peerCount,
+        stationary: meshStationaryMode,
+        durationMinutes: 10,
+      });
+
+      setMeshThrottleSimulation(simulation);
+
+      setAuthNotice({
+        tone: simulation.batterySavedPercent > 0 ? 'success' : 'default',
+        title: 'Mesh throttle simulation complete',
+        message: `10 min run · baseline ${simulation.baseline.broadcastCount} broadcasts -> throttled ${simulation.throttled.broadcastCount} · saved ${simulation.batterySavedPercent.toFixed(2)}% battery`,
+      });
+      pushLiveNotification({
+        tone: simulation.batterySavedPercent > 0 ? 'success' : 'default',
+        title: 'Battery-aware throttle measured',
+        message: `saved ${simulation.batterySavedPercent.toFixed(2)}% over 10 minutes`,
+      });
+    } catch (error) {
+      setAuthNotice({
+        tone: 'danger',
+        title: 'Mesh throttle simulation failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Unable to simulate battery-aware mesh throttle.',
+      });
+      pushLiveNotification({
+        tone: 'danger',
+        title: 'Mesh throttle simulation failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Unable to simulate battery-aware mesh throttle.',
+      });
+    } finally {
+      setSimulatingMeshThrottle(false);
+    }
+  }
+
+  async function handleComputeRendezvousPlan() {
+    if (!activeSession || !scannerDeliveryId) {
+      return;
+    }
+
+    setComputingHandoffPlan(true);
+
+    try {
+      const plan = await fleetApi.computeOptimalRendezvousPlan({
+        loginData,
+        session: activeSession,
+        deliveryId: scannerDeliveryId,
+      });
+
+      setHandoffPlan(plan);
+
+      const latestEvent = await fleetApi.getLatestHandoffEvent({
+        loginData,
+        session: activeSession,
+        deliveryId: scannerDeliveryId,
+      });
+      setLatestHandoffEvent(latestEvent);
+
+      await Promise.all([refreshRoutingOverview(), refreshMeshSnapshot()]);
+
+      setAuthNotice({
+        tone: plan.feasible ? 'success' : 'warning',
+        title: plan.feasible ? 'Rendezvous computed' : 'Rendezvous unavailable',
+        message: plan.feasible
+          ? `${plan.rendezvousNodeId} · total ETA ${plan.totalEtaMinutes}m · ${plan.sourceVehicleId} -> ${plan.targetVehicleId}`
+          : plan.reason ?? 'No feasible rendezvous satisfies drone constraints.',
+      });
+      pushLiveNotification({
+        tone: plan.feasible ? 'success' : 'warning',
+        title: 'Hybrid handoff plan',
+        message: plan.feasible
+          ? `${plan.rendezvousNodeId} computed for ${scannerDeliveryId}`
+          : plan.reason ?? 'No feasible handoff plan',
+      });
+    } catch (error) {
+      setAuthNotice({
+        tone: 'danger',
+        title: 'Rendezvous computation failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Unable to compute hybrid rendezvous plan.',
+      });
+      pushLiveNotification({
+        tone: 'danger',
+        title: 'Rendezvous computation failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Unable to compute hybrid rendezvous plan.',
+      });
+    } finally {
+      setComputingHandoffPlan(false);
+    }
+  }
+
+  async function handleExecuteHandoffTransfer() {
+    if (!activeSession || !scannerDeliveryId) {
+      return;
+    }
+
+    setExecutingHandoff(true);
+
+    try {
+      const result = await fleetApi.executeHandoffTransfer({
+        loginData,
+        session: activeSession,
+        deliveryId: scannerDeliveryId,
+      });
+      setHandoffTransfer(result);
+
+      const [latestEvent, refreshedDashboard] = await Promise.all([
+        fleetApi.getLatestHandoffEvent({
+          loginData,
+          session: activeSession,
+          deliveryId: scannerDeliveryId,
+        }),
+        getDashboardScreenData(),
+      ]);
+
+      setLatestHandoffEvent(latestEvent);
+      setLiveDashboardData(previousDashboard => {
+        emitRealtimeNotifications(previousDashboard, refreshedDashboard);
+        return refreshedDashboard;
+      });
+
+      await Promise.all([
+        refreshLatestPodReceipt(scannerDeliveryId),
+        refreshRoutingOverview(),
+        refreshMeshSnapshot(),
+      ]);
+
+      setAuthNotice({
+        tone: 'success',
+        title: 'Handoff ownership transferred',
+        message: `${result.handoffId} · receipt ${result.receiptId} · event ${result.ownershipTransferEventId}`,
+      });
+      pushLiveNotification({
+        tone: 'success',
+        title: 'Hybrid handoff completed',
+        message: `${scannerDeliveryId} transferred to ${result.targetVehicleId}`,
+      });
+    } catch (error) {
+      setAuthNotice({
+        tone: 'danger',
+        title: 'Handoff transfer failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Unable to execute handoff ownership transfer.',
+      });
+      pushLiveNotification({
+        tone: 'danger',
+        title: 'Handoff transfer failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Unable to execute handoff ownership transfer.',
+      });
+    } finally {
+      setExecutingHandoff(false);
+    }
+  }
+
   async function handleRunMeshSync() {
     if (!activeSession) {
       return;
@@ -1437,6 +1714,11 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
     setMeshRoleCycle(null);
     setMeshStoreForwardCycle(null);
     setMeshRelaySnapshot(null);
+    setMeshThrottleSimulation(null);
+    setDroneRequiredZones([]);
+    setHandoffPlan(null);
+    setHandoffTransfer(null);
+    setLatestHandoffEvent(null);
     setRoutingOverview(null);
     setLastRoutingRecompute(null);
     setUpdatingEdgeId(null);
@@ -2029,9 +2311,22 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
               Handoff {routeSummary?.requiresHandoff ? 'required' : 'not required'}
             </Text>
             <Text className="text-[14px] text-[#E8EEF9]">
+              Drone zone{' '}
+              {activeDroneRequiredZone?.droneRequired
+                ? 'required'
+                : activeDroneRequiredZone
+                  ? 'not required'
+                  : 'unknown'}
+            </Text>
+            <Text className="text-[14px] text-[#E8EEF9]">
               Priority {routeSummary?.priorityTier ?? '—'}
             </Text>
           </View>
+          {activeDroneRequiredZone ? (
+            <Text className="mt-3 text-[12px] leading-5 text-[#9EB0D0]">
+              {activeDroneRequiredZone.reason}
+            </Text>
+          ) : null}
         </View>
 
         {routeSummary?.requiresHandoff &&
@@ -2451,6 +2746,33 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
           />
         </View>
 
+        <View className="flex-row items-center justify-between rounded-xl border border-[#2F415E] bg-[#182438] px-4 py-3">
+          <Text className="flex-1 text-[14px] text-[#D0D9EC]">
+            Stationary mode
+          </Text>
+          <Switch
+            accessibilityLabel="Stationary accelerometer state"
+            value={meshStationaryMode}
+            onValueChange={setMeshStationaryMode}
+          />
+        </View>
+
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Run battery-aware throttle simulation"
+          disabled={simulatingMeshThrottle || !activeSession}
+          onPress={handleSimulateMeshThrottle}
+          className={`min-h-[44px] items-center justify-center rounded-lg bg-[#2D5B4A] px-4 ${
+            simulatingMeshThrottle || !activeSession ? 'opacity-60' : ''
+          }`}
+        >
+          <Text className="text-[13px] font-medium text-[#DFF7EB]">
+            {simulatingMeshThrottle
+              ? 'Simulating 10-min run...'
+              : 'Run 10-min battery simulation'}
+          </Text>
+        </Pressable>
+
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Evaluate mesh role"
@@ -2593,6 +2915,50 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
                 value={meshStoreForwardCycle.relayStored ? 'yes' : 'no'}
               />
             </View>
+          </View>
+        ) : null}
+
+        {meshThrottleSimulation ? (
+          <View className="rounded-xl border border-[#2A4A44] bg-[#102822] p-4">
+            <Text className="text-[11px] font-semibold uppercase tracking-wider text-[#8CCCB7]">
+              Battery-aware throttle result
+            </Text>
+            <View className="mt-2 gap-1">
+              <MeshRow
+                label="Duration"
+                value={`${meshThrottleSimulation.durationMinutes} min`}
+              />
+              <MeshRow
+                label="Baseline broadcasts"
+                value={String(meshThrottleSimulation.baseline.broadcastCount)}
+              />
+              <MeshRow
+                label="Throttled broadcasts"
+                value={String(meshThrottleSimulation.throttled.broadcastCount)}
+              />
+              <MeshRow
+                label="Saved battery"
+                value={`${meshThrottleSimulation.batterySavedPercent.toFixed(2)}%`}
+              />
+              <MeshRow
+                label="Nearest node"
+                value={meshThrottleSimulation.context.nearestNodeId ?? 'unknown'}
+              />
+              <MeshRow
+                label="Distance"
+                value={`${meshThrottleSimulation.context.knownNodeDistanceMeters} m`}
+              />
+            </View>
+            <Text className="mt-2 text-[11px] text-[#BFE7D8]">
+              Factors: battery{' '}
+              {meshThrottleSimulation.reductionApplied.batteryLow ? 'low' : 'normal'}
+              {' · '}stationary{' '}
+              {meshThrottleSimulation.reductionApplied.stationary ? 'yes' : 'no'}
+              {' · '}near node{' '}
+              {meshThrottleSimulation.reductionApplied.nearKnownNode
+                ? 'yes'
+                : 'no'}
+            </Text>
           </View>
         ) : null}
 
@@ -2751,6 +3117,16 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
   }
 
   function renderHandoffView() {
+    const handoffState = handoffTransfer
+      ? 'ownership-transferred'
+      : latestHandoffEvent?.status === 'ownership_transferred'
+        ? 'ownership-transferred'
+        : latestHandoffEvent?.status === 'confirmed'
+          ? 'handoff-confirmed'
+          : routeSummary?.requiresHandoff || activeDroneRequiredZone?.droneRequired
+            ? 'drone-required'
+            : 'rendezvous-pending';
+
     return (
       <View className="gap-3">
         <View className="rounded-xl border border-[#213350] bg-[#212C40] p-4">
@@ -2758,22 +3134,167 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
             Handoff
           </Text>
           <Text className="mt-2 text-[16px] font-semibold text-[#EFF3FC]">
-            {routeSummary?.requiresHandoff ? 'Required' : 'Not required'}
+            {routeSummary?.requiresHandoff || activeDroneRequiredZone?.droneRequired
+              ? 'Required'
+              : 'Not required'}
           </Text>
           <Text className="mt-2 text-[14px] leading-5 text-[#BEC9DE]">
-            {routeSummary?.requiresHandoff
-              ? `Waypoint ${triageAlerts[0]?.safeWaypointNodeId ?? '—'} · ${routeSummary.deliveryId}`
-              : '—'}
+            {scannerDeliveryId
+              ? `${scannerDeliveryId} · ${handoffState.replace(/-/g, ' ')}`
+              : 'No active delivery'}
           </Text>
+          {activeDroneRequiredZone ? (
+            <Text className="mt-2 text-[12px] leading-5 text-[#9EB0D0]">
+              {activeDroneRequiredZone.reason}
+            </Text>
+          ) : null}
         </View>
+
+        <View className="rounded-xl border border-[#2A3F5E] bg-[#131E31] p-4">
+          <Text className="text-[11px] font-semibold uppercase tracking-wider text-[#8FA7CB]">
+            Reachability analysis
+          </Text>
+          {activeDroneRequiredZone ? (
+            <View className="mt-2 gap-1">
+              <MeshRow
+                label="Truck"
+                value={activeDroneRequiredZone.reachableByTruck ? 'reachable' : 'blocked'}
+              />
+              <MeshRow
+                label="Speedboat"
+                value={
+                  activeDroneRequiredZone.reachableBySpeedboat ? 'reachable' : 'blocked'
+                }
+              />
+              <MeshRow
+                label="Drone"
+                value={activeDroneRequiredZone.reachableByDrone ? 'reachable' : 'blocked'}
+              />
+            </View>
+          ) : (
+            <Text className="mt-2 text-[12px] text-[#9EB0D0]">
+              Reachability pending.
+            </Text>
+          )}
+        </View>
+
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Compute rendezvous"
+          disabled={computingHandoffPlan || !scannerDeliveryId}
+          onPress={handleComputeRendezvousPlan}
+          className={`min-h-[46px] items-center justify-center rounded-lg bg-[#8FD1B5] px-4 ${
+            computingHandoffPlan || !scannerDeliveryId ? 'opacity-60' : ''
+          }`}
+        >
+          <Text className="text-[14px] font-semibold text-[#103825]">
+            {computingHandoffPlan ? 'Computing rendezvous...' : 'Compute rendezvous'}
+          </Text>
+        </Pressable>
+
+        {handoffPlan ? (
+          <View className="rounded-xl border border-[#2A3F5E] bg-[#131E31] p-4">
+            <Text className="text-[11px] font-semibold uppercase tracking-wider text-[#8FA7CB]">
+              Rendezvous plan
+            </Text>
+            {handoffPlan.feasible ? (
+              <View className="mt-2 gap-1">
+                <MeshRow label="Node" value={handoffPlan.rendezvousNodeId} />
+                <MeshRow
+                  label="Boat ETA"
+                  value={`${handoffPlan.boatEtaMinutes} min`}
+                />
+                <MeshRow
+                  label="Drone ETA (to node)"
+                  value={`${handoffPlan.droneEtaToRendezvousMinutes} min`}
+                />
+                <MeshRow
+                  label="Drone ETA (to destination)"
+                  value={`${handoffPlan.droneEtaToDestinationMinutes} min`}
+                />
+                <MeshRow
+                  label="Total ETA"
+                  value={`${handoffPlan.totalEtaMinutes} min`}
+                />
+              </View>
+            ) : (
+              <Text className="mt-2 text-[13px] text-[#E6B5A8]">
+                {handoffPlan.reason ?? 'No feasible rendezvous plan.'}
+              </Text>
+            )}
+          </View>
+        ) : null}
+
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Execute ownership transfer"
+          disabled={
+            executingHandoff ||
+            !scannerDeliveryId ||
+            (handoffPlan !== null && !handoffPlan.feasible)
+          }
+          onPress={handleExecuteHandoffTransfer}
+          className={`min-h-[46px] items-center justify-center rounded-lg bg-[#BFD0F7] px-4 ${
+            executingHandoff ||
+            !scannerDeliveryId ||
+            (handoffPlan !== null && !handoffPlan.feasible)
+              ? 'opacity-60'
+              : ''
+          }`}
+        >
+          <Text className="text-[14px] font-semibold text-[#102950]">
+            {executingHandoff
+              ? 'Executing PoD + transfer...'
+              : 'Execute ownership transfer'}
+          </Text>
+        </Pressable>
+
+        {latestHandoffEvent ? (
+          <View className="rounded-xl border border-[#2A3F5E] bg-[#131E31] p-4">
+            <Text className="text-[11px] font-semibold uppercase tracking-wider text-[#8FA7CB]">
+              Latest handoff event
+            </Text>
+            <View className="mt-2 gap-1">
+              <MeshRow label="Handoff" value={latestHandoffEvent.handoffId} />
+              <MeshRow
+                label="Status"
+                value={latestHandoffEvent.status.replace(/_/g, ' ')}
+              />
+              <MeshRow
+                label="Source"
+                value={latestHandoffEvent.sourceVehicleId}
+              />
+              <MeshRow
+                label="Target"
+                value={latestHandoffEvent.targetVehicleId}
+              />
+              <MeshRow
+                label="Receipt"
+                value={latestHandoffEvent.receiptId ?? 'pending'}
+              />
+            </View>
+          </View>
+        ) : null}
+
+        {handoffTransfer ? (
+          <View className="rounded-xl border border-[#2F5A4E] bg-[#153228] p-4">
+            <Text className="text-[11px] font-semibold uppercase tracking-wider text-[#9DE1C6]">
+              Transfer committed
+            </Text>
+            <Text className="mt-2 text-[13px] text-[#E7FFF5]">
+              Receipt {handoffTransfer.receiptId} · ledger event{' '}
+              {handoffTransfer.ownershipTransferEventId}
+            </Text>
+          </View>
+        ) : null}
 
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Back"
           onPress={() => setCommandSubview('main')}
-          className="min-h-[44px] items-center justify-center rounded-lg bg-[#BFD0F7] px-4"
+          className="min-h-[44px] items-center justify-center rounded-lg bg-[#233955] px-4"
         >
-          <Text className="text-[14px] font-semibold text-[#102950]">Back</Text>
+          <Text className="text-[14px] font-semibold text-[#CFE1FF]">Back</Text>
         </Pressable>
       </View>
     );

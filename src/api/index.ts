@@ -5,5 +5,6 @@ export * from './sync';
 export * from './mesh';
 export * from './pod';
 export * from './routing';
+export * from './fleet';
 export * from './screen-data';
 export * from './seeded-demo-scenario';

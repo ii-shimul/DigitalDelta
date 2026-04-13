@@ -6,3 +6,4 @@ export * from './mesh';
 export * from './pod';
 export * from './routing';
 export * from './triage';
+export * from './fleet';
