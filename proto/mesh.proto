@@ -46,3 +46,58 @@ message MeshPacket {
     EncryptedEnvelope encrypted_envelope = 3;
   }
 }
+
+// ── Store-and-Forward Wire Format (C1: Protobuf mandatory for all mesh) ──
+
+// Individual encrypted mesh packet relayed over BLE GATT
+message MeshPacketWire {
+  string message_id = 1;
+  string origin_device_id = 2;
+  string destination_device_id = 3;
+  string relay_device_id = 4;
+  uint32 ttl_hops = 5;
+  uint32 hop_count = 6;
+  string dedup_key = 7;
+  string content_type = 8;
+  bytes nonce = 9;
+  bytes ciphertext = 10;
+  bytes sender_pub_x25519 = 11;
+  uint64 created_at_ms = 12;
+  uint64 expires_at_ms = 13;
+  string sender_role = 14;
+}
+
+// Bundle of mesh packets exchanged during a BLE relay session
+message MeshBundle {
+  repeated MeshPacketWire packets = 1;
+  string relay_node_id = 2;
+  string relay_node_role = 3;
+  uint64 timestamp_ms = 4;
+}
+
+// Role broadcast announcement sent to peer nodes
+message MeshRoleAnnouncement {
+  string device_id = 1;
+  NodeRole role = 2;
+  uint32 battery_percent = 3;
+  sint32 signal_strength_dbm = 4;
+  uint32 queue_depth = 5;
+  uint64 timestamp_ms = 6;
+}
+
+// Queue status response from a mesh node
+message MeshQueueStatus {
+  string device_id = 1;
+  uint32 pending_count = 2;
+  uint32 in_transit_count = 3;
+  uint32 delivered_count = 4;
+  uint32 expired_count = 5;
+  NodeRole current_role = 6;
+}
+
+// gRPC service definition for mesh relay operations
+service MeshService {
+  rpc RelayBundle(MeshBundle) returns (MeshQueueStatus);
+  rpc AnnounceRole(MeshRoleAnnouncement) returns (MeshQueueStatus);
+  rpc GetQueueStatus(MeshQueueStatus) returns (MeshQueueStatus);
+}

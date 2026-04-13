@@ -5,6 +5,7 @@ import * as nacl from 'tweetnacl';
 import {
   bytesToHex,
   computeSha256Hex,
+  encodeUtf8,
   hexToBytes,
   randomBytes,
 } from '../auth/crypto';
@@ -55,7 +56,7 @@ export function signPodPayload(
   secretKey: Uint8Array,
 ): SignedPodPayload {
   const canonical = canonicalise(payload);
-  const msgBytes = new TextEncoder().encode(canonical);
+  const msgBytes = encodeUtf8(canonical);
   const sigBytes = nacl.sign.detached(msgBytes, secretKey);
   return { ...payload, signature: bytesToHex(sigBytes) };
 }
@@ -70,7 +71,7 @@ export function verifyPodSignature(signed: SignedPodPayload): VerifyResult {
   try {
     const { signature, ...payload } = signed;
     const canonical = canonicalise(payload as PodPayload);
-    const msgBytes = new TextEncoder().encode(canonical);
+    const msgBytes = encodeUtf8(canonical);
     const sigBytes = hexToBytes(signature);
     const pubKeyBytes = hexToBytes(signed.sender_pubkey);
 

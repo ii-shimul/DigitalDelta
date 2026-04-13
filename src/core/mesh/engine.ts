@@ -13,6 +13,7 @@ import {
   bytesToHex,
   hexToBytes,
   encodeUtf8,
+  decodeUtf8,
   randomBytes,
 } from '../auth/crypto';
 
@@ -120,7 +121,7 @@ export function decryptFromSender(
     return null;
   }
 
-  return new TextDecoder().decode(plaintext);
+  return decodeUtf8(plaintext);
 }
 
 /**
@@ -222,4 +223,165 @@ export function computeNodeRole(
     role: 'relay',
     reason: `Adequate conditions – acting as RELAY`,
   };
+}
+
+// ── Protobuf Wire Format (C1 Mandatory) ──────────────────────────────
+// All mesh relay communication uses Protobuf. JSON on the mesh wire is forbidden.
+
+/** 4-byte magic prefix distinguishes mesh packets from CRDT sync deltas on BLE */
+export const MESH_MAGIC = new Uint8Array([0x4d, 0x45, 0x53, 0x48]); // "MESH"
+
+const MESH_PROTO_SCHEMA = `
+syntax = "proto3";
+package digitaldelta.v1;
+
+message MeshPacketWire {
+  string message_id = 1;
+  string origin_device_id = 2;
+  string destination_device_id = 3;
+  string relay_device_id = 4;
+  uint32 ttl_hops = 5;
+  uint32 hop_count = 6;
+  string dedup_key = 7;
+  string content_type = 8;
+  bytes nonce = 9;
+  bytes ciphertext = 10;
+  bytes sender_pub_x25519 = 11;
+  uint64 created_at_ms = 12;
+  uint64 expires_at_ms = 13;
+  string sender_role = 14;
+}
+
+message MeshBundle {
+  repeated MeshPacketWire packets = 1;
+  string relay_node_id = 2;
+  string relay_node_role = 3;
+  uint64 timestamp_ms = 4;
+  bytes relay_node_x25519_pub = 5;
+}
+`;
+
+// ── Wire format types ─────────────────────────────────────────────────
+
+export type MeshPacketWireType = {
+  messageId: string;
+  originDeviceId: string;
+  destinationDeviceId: string;
+  relayDeviceId: string;
+  ttlHops: number;
+  hopCount: number;
+  dedupKey: string;
+  contentType: string;
+  nonce: Uint8Array;
+  ciphertext: Uint8Array;
+  senderPubX25519: Uint8Array;
+  createdAtMs: number;
+  expiresAtMs: number;
+  senderRole: string;
+};
+
+export type MeshBundleType = {
+  packets: MeshPacketWireType[];
+  relayNodeId: string;
+  relayNodeRole: string;
+  timestampMs: number;
+  relayNodeX25519Pub?: Uint8Array;
+};
+
+// ── Protobuf encode/decode ────────────────────────────────────────────
+
+let _meshPbRoot: unknown = null;
+
+async function getMeshPbRoot(): Promise<unknown> {
+  if (_meshPbRoot) return _meshPbRoot;
+  const protobuf = await import('protobufjs');
+  _meshPbRoot = (protobuf.default ?? protobuf).parse(MESH_PROTO_SCHEMA).root;
+  return _meshPbRoot;
+}
+
+/** Check if bytes start with MESH magic prefix */
+export function hasMeshMagic(bytes: Uint8Array): boolean {
+  if (bytes.length < MESH_MAGIC.length) return false;
+  for (let i = 0; i < MESH_MAGIC.length; i++) {
+    if (bytes[i] !== MESH_MAGIC[i]) return false;
+  }
+  return true;
+}
+
+/** Convert a MeshMessage to Protobuf wire format */
+export function meshMessageToWire(
+  msg: MeshMessage,
+  senderRole: NodeRole,
+): MeshPacketWireType {
+  return {
+    messageId: msg.messageId,
+    originDeviceId: msg.originDeviceId,
+    destinationDeviceId: msg.destinationDeviceId,
+    relayDeviceId: msg.relayDeviceId ?? '',
+    ttlHops: msg.ttlHops,
+    hopCount: msg.hopCount,
+    dedupKey: msg.dedupKey,
+    contentType: msg.contentType,
+    nonce: hexToBytes(msg.nonceHex),
+    ciphertext: hexToBytes(msg.ciphertextHex),
+    senderPubX25519: hexToBytes(msg.senderPubX25519Hex),
+    createdAtMs: msg.createdAtMs,
+    expiresAtMs: msg.expiresAtMs,
+    senderRole,
+  };
+}
+
+/** Convert Protobuf wire format back to MeshMessage */
+export function wireToMeshMessage(wire: MeshPacketWireType): MeshMessage {
+  const toBytes = (v: unknown): Uint8Array =>
+    v instanceof Uint8Array ? v : new Uint8Array(v as ArrayBuffer);
+  return {
+    messageId: wire.messageId,
+    originDeviceId: wire.originDeviceId,
+    destinationDeviceId: wire.destinationDeviceId,
+    relayDeviceId: wire.relayDeviceId || null,
+    status: 'in_transit',
+    ttlHops: wire.ttlHops,
+    hopCount: wire.hopCount,
+    dedupKey: wire.dedupKey,
+    contentType: wire.contentType,
+    nonceHex: bytesToHex(toBytes(wire.nonce)),
+    ciphertextHex: bytesToHex(toBytes(wire.ciphertext)),
+    senderPubX25519Hex: bytesToHex(toBytes(wire.senderPubX25519)),
+    createdAtMs: Number(wire.createdAtMs),
+    expiresAtMs: Number(wire.expiresAtMs),
+    deliveredAtMs: null,
+    plaintextPreview: null,
+  };
+}
+
+/** Encode a MeshBundle to Protobuf bytes with MESH magic prefix */
+export async function encodeMeshBundle(
+  bundle: MeshBundleType,
+): Promise<Uint8Array> {
+  const root = (await getMeshPbRoot()) as {
+    lookupType: (name: string) => {
+      encode: (msg: unknown) => { finish: () => Uint8Array };
+    };
+  };
+  const BundleType = root.lookupType('digitaldelta.v1.MeshBundle');
+  const pbBytes = BundleType.encode(bundle).finish();
+  const result = new Uint8Array(MESH_MAGIC.length + pbBytes.length);
+  result.set(MESH_MAGIC, 0);
+  result.set(pbBytes, MESH_MAGIC.length);
+  return result;
+}
+
+/** Decode Protobuf bytes (strips MESH magic) to MeshBundle */
+export async function decodeMeshBundle(
+  bytes: Uint8Array,
+): Promise<MeshBundleType> {
+  const root = (await getMeshPbRoot()) as {
+    lookupType: (name: string) => {
+      decode: (bytes: Uint8Array) => MeshBundleType;
+    };
+  };
+  const BundleType = root.lookupType('digitaldelta.v1.MeshBundle');
+  const offset = hasMeshMagic(bytes) ? MESH_MAGIC.length : 0;
+  return BundleType.decode(bytes.subarray(offset)) as MeshBundleType;
 }

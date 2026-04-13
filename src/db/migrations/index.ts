@@ -8,6 +8,7 @@ import { triageMigration } from './0006_triage';
 import { podMigration } from './0007_pod';
 import { fleetMigration } from './0008_fleet';
 import { crdtHistoryMigration } from './0009_crdt_history';
+import { meshPeersMigration } from './0010_mesh_peers';
 
 export const migrations: Migration[] = [
   initialMigration,
@@ -19,4 +20,5 @@ export const migrations: Migration[] = [
   podMigration,
   fleetMigration,
   crdtHistoryMigration,
+  meshPeersMigration,
 ];

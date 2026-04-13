@@ -5,6 +5,7 @@ import { getLocalDeviceSeed } from './auth';
 import {
   bytesToHex,
   computeSha256Hex,
+  encodeUtf8,
   hexToBytes,
   randomBytes,
 } from '../core/auth/crypto';
@@ -235,9 +236,7 @@ export async function verifyAndCountersign(
   const recipientPubHex = await getPublicKeyHex(user);
   let recipientSigHex: string | null = null;
   if (secretKey && recipientPubHex) {
-    const msgBytes = new TextEncoder().encode(
-      signed.payload_hash + signed.delivery_id,
-    );
+    const msgBytes = encodeUtf8(signed.payload_hash + signed.delivery_id);
     const sigBytes = nacl.sign.detached(msgBytes, secretKey);
     recipientSigHex = bytesToHex(sigBytes);
   }

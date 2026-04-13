@@ -12,6 +12,9 @@ import {
   encryptForRecipient,
   decryptFromSender,
   x25519PubHexFromSeed,
+  meshMessageToWire,
+  wireToMeshMessage,
+  type MeshPacketWireType,
 } from '../core/mesh/engine';
 
 export type { MeshMessage, NodeRole, NodeRoleLogEntry };
@@ -148,7 +151,13 @@ export async function sendMeshMessage(
     recipientX25519PubHex = x25519PubHexFromSeed(senderSeed);
   }
   if (!recipientX25519PubHex) {
-    throw new Error('Recipient public key required for non-self destinations');
+    // Look up from discovered mesh peers
+    recipientX25519PubHex = await getPeerPubKey(input.destinationDeviceId);
+  }
+  if (!recipientX25519PubHex) {
+    throw new Error(
+      'Recipient public key not found. Relay via BLE first to discover peer keys.',
+    );
   }
 
   const encrypted = encryptForRecipient(
@@ -332,4 +341,188 @@ export async function getMeshStats(deviceId: string): Promise<{
     expired: stats['expired'] ?? 0,
     currentRole: roleEntry?.role ?? null,
   };
+}
+
+// ── Store-and-Forward Relay (M3.1) ──────────────────────────────────────
+
+/**
+ * Get messages eligible for BLE mesh relay.
+ * Returns pending/in_transit messages NOT destined for the local device
+ * (those should be delivered locally, not forwarded).
+ */
+export async function getForwardableMessages(
+  localDeviceId: string,
+): Promise<MeshMessage[]> {
+  const db = await getDatabase();
+  const nowMs = Date.now();
+  const result = await db.execute(
+    `SELECT * FROM mesh_messages
+     WHERE status IN ('pending', 'in_transit')
+       AND expires_at_ms > ?
+       AND destination_device_id != ?
+     ORDER BY created_at_ms ASC
+     LIMIT 20`,
+    [nowMs, localDeviceId],
+  );
+  return result.rows.map(r => rowToMessage(r as Record<string, unknown>));
+}
+
+/**
+ * Receive relayed mesh messages from a BLE peer.
+ * Deduplicates by dedup_key, auto-delivers messages destined for this device.
+ */
+export async function receiveRelayedMessages(
+  messages: MeshMessage[],
+  localDeviceId: string,
+  localSeed?: Uint8Array,
+): Promise<{ stored: number; delivered: number; duplicates: number }> {
+  const db = await getDatabase();
+  let stored = 0;
+  let delivered = 0;
+  let duplicates = 0;
+  const nowMs = Date.now();
+
+  for (const msg of messages) {
+    if (nowMs > msg.expiresAtMs) continue;
+
+    // Dedup check via UNIQUE constraint on dedup_key
+    const existing = await db.execute(
+      `SELECT 1 FROM mesh_messages WHERE dedup_key = ?`,
+      [msg.dedupKey],
+    );
+    if (existing.rows.length > 0) {
+      duplicates++;
+      continue;
+    }
+
+    // Auto-deliver if destined for this device
+    let status = msg.status;
+    let deliveredAtMs: number | null = null;
+    let plaintextPreview: string | null = null;
+
+    if (msg.destinationDeviceId === localDeviceId && localSeed) {
+      const plaintext = decryptFromSender(
+        msg.ciphertextHex,
+        msg.nonceHex,
+        msg.senderPubX25519Hex,
+        localSeed,
+      );
+      if (plaintext !== null) {
+        status = 'delivered';
+        deliveredAtMs = nowMs;
+        plaintextPreview = plaintext;
+        delivered++;
+      }
+    }
+
+    await db.execute(
+      `INSERT OR IGNORE INTO mesh_messages
+       (message_id, origin_device_id, destination_device_id, relay_device_id,
+        status, ttl_hops, hop_count, dedup_key, content_type,
+        nonce_hex, ciphertext_hex, sender_pub_x25519_hex,
+        created_at_ms, expires_at_ms, delivered_at_ms, plaintext_preview, metadata_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}')`,
+      [
+        msg.messageId,
+        msg.originDeviceId,
+        msg.destinationDeviceId,
+        msg.relayDeviceId,
+        status,
+        msg.ttlHops,
+        msg.hopCount,
+        msg.dedupKey,
+        msg.contentType,
+        msg.nonceHex,
+        msg.ciphertextHex,
+        msg.senderPubX25519Hex,
+        msg.createdAtMs,
+        msg.expiresAtMs,
+        deliveredAtMs,
+        plaintextPreview,
+      ],
+    );
+    stored++;
+  }
+
+  return { stored, delivered, duplicates };
+}
+
+/**
+ * Mark messages as relayed (in_transit) after BLE transmission.
+ */
+export async function markMessagesRelayed(
+  messageIds: string[],
+  relayDeviceId: string,
+): Promise<void> {
+  if (messageIds.length === 0) return;
+  const db = await getDatabase();
+  const placeholders = messageIds.map(() => '?').join(',');
+  await db.execute(
+    `UPDATE mesh_messages SET status = 'in_transit', relay_device_id = ?
+     WHERE message_id IN (${placeholders}) AND status IN ('pending', 'in_transit')`,
+    [relayDeviceId, ...messageIds],
+  );
+}
+
+// ── Mesh Peer Discovery (M3.1 / M3.3) ──────────────────────────────────
+
+export type MeshPeer = {
+  deviceId: string;
+  x25519PubHex: string;
+  displayName: string | null;
+  lastSeenMs: number;
+  discoveredVia: string;
+};
+
+/**
+ * Save or update a discovered mesh peer's public key.
+ * Called during BLE relay handshake when we receive the peer's MeshBundle.
+ */
+export async function saveMeshPeer(
+  deviceId: string,
+  x25519PubHex: string,
+  discoveredVia = 'ble',
+): Promise<void> {
+  const db = await getDatabase();
+  await db.execute(
+    `INSERT INTO mesh_peers (device_id, x25519_pub_hex, last_seen_ms, discovered_via)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(device_id) DO UPDATE SET
+       x25519_pub_hex = excluded.x25519_pub_hex,
+       last_seen_ms = excluded.last_seen_ms`,
+    [deviceId, x25519PubHex, Date.now(), discoveredVia],
+  );
+}
+
+/**
+ * Get all discovered mesh peers (most recent first).
+ */
+export async function getMeshPeers(): Promise<MeshPeer[]> {
+  const db = await getDatabase();
+  const result = await db.execute(
+    `SELECT * FROM mesh_peers ORDER BY last_seen_ms DESC LIMIT 20`,
+  );
+  return result.rows.map(r => {
+    const row = r as Record<string, unknown>;
+    return {
+      deviceId: row.device_id as string,
+      x25519PubHex: row.x25519_pub_hex as string,
+      displayName: (row.display_name as string) ?? null,
+      lastSeenMs: row.last_seen_ms as number,
+      discoveredVia: row.discovered_via as string,
+    };
+  });
+}
+
+/**
+ * Look up a peer's X25519 public key by device ID.
+ */
+export async function getPeerPubKey(deviceId: string): Promise<string | null> {
+  const db = await getDatabase();
+  const result = await db.execute(
+    `SELECT x25519_pub_hex FROM mesh_peers WHERE device_id = ?`,
+    [deviceId],
+  );
+  const row = result.rows[0] as Record<string, unknown> | undefined;
+  return row ? (row.x25519_pub_hex as string) : null;
 }

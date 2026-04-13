@@ -28,6 +28,16 @@ import {
 } from 'react-native-ble-plx';
 import { Platform, PermissionsAndroid } from 'react-native';
 import { getBlePeripheral } from './ble-peripheral';
+import {
+  type MeshPacketWireType,
+  hasMeshMagic,
+  decodeMeshBundle,
+  encodeMeshBundle,
+  meshMessageToWire,
+  wireToMeshMessage,
+  applyRelayHop,
+  x25519PubHexFromSeed,
+} from './engine';
 
 // ── Base64 helpers (Hermes-safe, no Buffer) ───────────────────────────────
 // React Native's Hermes engine does not have Node's Buffer global.
@@ -248,11 +258,19 @@ export class BleSyncService {
     await peripheral.startServer(vectorClockJson);
     this.peripheralStarted = true;
 
-    // When a Central writes its delta to us, apply it via CRDT
+    // When a Central writes data to us, dispatch by type
     this.peripheralUnsubDelta = peripheral.onDeltaReceived(
       async (base64: string, deviceAddress: string) => {
         try {
           const bytes = base64ToBytes(base64);
+
+          // Mesh relay bundle (MESH magic prefix) — M3.1 store-and-forward
+          if (hasMeshMagic(bytes)) {
+            await this._handleIncomingMeshBundle(bytes, deviceAddress);
+            return;
+          }
+
+          // CRDT sync delta (M2.4) — existing behavior
           const peerDelta = await decodeSyncDelta(bytes);
           await this._applyReceivedDelta(peerDelta, deviceAddress);
 
@@ -652,6 +670,244 @@ export class BleSyncService {
     }
 
     return { localWins, remoteWins, conflicts };
+  }
+
+  // ── M3.1 Mesh Relay via BLE ──────────────────────────────────────────
+
+  /**
+   * Scan for a BLE peer and exchange mesh message queues (store-and-forward).
+   * Uses Protobuf-encoded MeshBundle over the same GATT characteristics.
+   */
+  async relayMeshToPeer(): Promise<{
+    relayed: number;
+    received: number;
+    peerId: string;
+  } | null> {
+    const hasPerms = await requestBlePermissionsAndroid();
+    if (!hasPerms) {
+      throw new Error(
+        'Bluetooth permissions denied. Grant "Nearby devices" permission.',
+      );
+    }
+
+    const peer = await this._discoverPeer();
+    if (!peer) return null;
+
+    try {
+      return await this._exchangeMeshWith(peer);
+    } finally {
+      try {
+        await peer.cancelConnection();
+      } catch {
+        // best-effort disconnect
+      }
+    }
+  }
+
+  /** Handle incoming mesh bundle from a Central (peripheral side). */
+  private async _handleIncomingMeshBundle(
+    bytes: Uint8Array,
+    deviceAddress: string,
+  ): Promise<void> {
+    const bundle = await decodeMeshBundle(bytes);
+
+    // Import lazily to avoid circular deps
+    const { getDeviceIdentity, getLocalDeviceSeed } = await import(
+      '../../api/auth'
+    );
+    const {
+      receiveRelayedMessages,
+      getForwardableMessages,
+      getCurrentRole,
+      saveMeshPeer,
+    } = await import('../../api/mesh');
+    const { bytesToHex, hexToBytes } = await import('../auth/crypto');
+
+    const identity = await getDeviceIdentity();
+    const deviceId = identity?.deviceId ?? '';
+    const seed = deviceId ? await getLocalDeviceSeed(deviceId) : null;
+
+    // Save peer's public key if included in bundle
+    if (bundle.relayNodeId && bundle.relayNodeX25519Pub) {
+      const pubBytes =
+        bundle.relayNodeX25519Pub instanceof Uint8Array
+          ? bundle.relayNodeX25519Pub
+          : new Uint8Array(bundle.relayNodeX25519Pub as ArrayBuffer);
+      if (pubBytes.length > 0) {
+        await saveMeshPeer(bundle.relayNodeId, bytesToHex(pubBytes));
+      }
+    }
+
+    // Store incoming packets (auto-delivers if destined for us)
+    const peerMessages = (bundle.packets || []).map(p =>
+      wireToMeshMessage(p as MeshPacketWireType),
+    );
+    await receiveRelayedMessages(peerMessages, deviceId, seed ?? undefined);
+
+    // Respond with our own mesh queue for the peer to forward
+    const myMessages = await getForwardableMessages(deviceId);
+    const roleEntry = await getCurrentRole(deviceId);
+    const role = roleEntry?.role ?? 'relay';
+
+    const wirePackets: MeshPacketWireType[] = [];
+    for (const msg of myMessages) {
+      if (msg.originDeviceId !== deviceId) {
+        const hopped = applyRelayHop(msg, deviceId);
+        if (!hopped) continue;
+        wirePackets.push(meshMessageToWire(hopped, role));
+      } else {
+        wirePackets.push(meshMessageToWire(msg, role));
+      }
+    }
+
+    if (wirePackets.length > 0 || seed) {
+      const responseBundle = {
+        packets: wirePackets,
+        relayNodeId: deviceId,
+        relayNodeRole: role,
+        timestampMs: Date.now(),
+        relayNodeX25519Pub: seed
+          ? hexToBytes(x25519PubHexFromSeed(seed))
+          : undefined,
+      };
+      const responseBytes = await encodeMeshBundle(responseBundle);
+      const peripheral = getBlePeripheral();
+      await peripheral.sendDelta(bytesToBase64(responseBytes));
+    }
+  }
+
+  /** Central-side: connect to peer GATT server and exchange mesh bundles. */
+  private async _exchangeMeshWith(
+    device: Device,
+  ): Promise<{ relayed: number; received: number; peerId: string }> {
+    const connected = await device.connect({ autoConnect: false });
+    const discovered = await connected.discoverAllServicesAndCharacteristics();
+
+    // Negotiate MTU
+    let chunkSize = DEFAULT_CHUNK_SIZE;
+    try {
+      const mtuDevice = await discovered.requestMTU(517);
+      chunkSize = Math.max(20, (mtuDevice.mtu ?? 23) - 3);
+    } catch {
+      chunkSize = DEFAULT_CHUNK_SIZE;
+    }
+
+    // Get local identity and role
+    const { getDeviceIdentity, getLocalDeviceSeed } = await import(
+      '../../api/auth'
+    );
+    const {
+      getForwardableMessages,
+      receiveRelayedMessages,
+      markMessagesRelayed,
+      getCurrentRole,
+      saveMeshPeer,
+    } = await import('../../api/mesh');
+    const { bytesToHex, hexToBytes } = await import('../auth/crypto');
+
+    const identity = await getDeviceIdentity();
+    const deviceId = identity?.deviceId ?? '';
+    const seed = deviceId ? await getLocalDeviceSeed(deviceId) : null;
+    const roleEntry = await getCurrentRole(deviceId);
+    const role = roleEntry?.role ?? 'relay';
+
+    // Build mesh bundle from local queue
+    const messages = await getForwardableMessages(deviceId);
+    const wirePackets: MeshPacketWireType[] = [];
+    for (const msg of messages) {
+      if (msg.originDeviceId !== deviceId) {
+        const hopped = applyRelayHop(msg, deviceId);
+        if (!hopped) continue;
+        wirePackets.push(meshMessageToWire(hopped, role));
+      } else {
+        wirePackets.push(meshMessageToWire(msg, role));
+      }
+    }
+
+    const bundle = {
+      packets: wirePackets,
+      relayNodeId: deviceId,
+      relayNodeRole: role,
+      timestampMs: Date.now(),
+      relayNodeX25519Pub: seed
+        ? hexToBytes(x25519PubHexFromSeed(seed))
+        : undefined,
+    };
+    const bytes = await encodeMeshBundle(bundle);
+
+    // Write Protobuf mesh bundle to peer GATT server (chunked)
+    const chunks = this._chunkBytes(bytes, chunkSize);
+    for (const chunk of chunks) {
+      const b64 = bytesToBase64(chunk);
+      await discovered.writeCharacteristicWithoutResponseForService(
+        DIGITAL_DELTA_SERVICE_UUID,
+        DELTA_CHAR_UUID,
+        b64,
+      );
+    }
+    // End-of-transmission signal
+    await discovered.writeCharacteristicWithoutResponseForService(
+      DIGITAL_DELTA_SERVICE_UUID,
+      DELTA_CHAR_UUID,
+      btoa(''),
+    );
+
+    // Mark sent messages as relayed
+    if (messages.length > 0) {
+      await markMessagesRelayed(
+        messages.map(m => m.messageId),
+        device.id,
+      );
+    }
+
+    // Read peer's mesh response from NOTIFY characteristic.
+    // The peripheral processes our bundle asynchronously, so we poll
+    // until the response appears (up to ~4 s).
+    let received = 0;
+    let resolvedPeerId = device.id;
+    for (let attempt = 0; attempt < 8; attempt++) {
+      if (attempt > 0) {
+        await new Promise<void>(r => setTimeout(r, 500));
+      }
+      try {
+        const notifyChar = await discovered.readCharacteristicForService(
+          DIGITAL_DELTA_SERVICE_UUID,
+          NOTIFY_CHAR_UUID,
+        );
+        if (!notifyChar.value) continue;
+        const peerBytes = base64ToBytes(notifyChar.value);
+        if (peerBytes.length <= 4 || !hasMeshMagic(peerBytes)) continue;
+
+        const peerBundle = await decodeMeshBundle(peerBytes);
+
+        // Save peer's public key for future message encryption
+        if (peerBundle.relayNodeId && peerBundle.relayNodeX25519Pub) {
+          const pubBytes =
+            peerBundle.relayNodeX25519Pub instanceof Uint8Array
+              ? peerBundle.relayNodeX25519Pub
+              : new Uint8Array(peerBundle.relayNodeX25519Pub as ArrayBuffer);
+          if (pubBytes.length > 0) {
+            await saveMeshPeer(peerBundle.relayNodeId, bytesToHex(pubBytes));
+            resolvedPeerId = peerBundle.relayNodeId;
+          }
+        }
+
+        const peerMessages = (peerBundle.packets || []).map(p =>
+          wireToMeshMessage(p as MeshPacketWireType),
+        );
+        const result = await receiveRelayedMessages(
+          peerMessages,
+          deviceId,
+          seed ?? undefined,
+        );
+        received = result.stored;
+        break; // success — stop polling
+      } catch {
+        // read failed, retry
+      }
+    }
+
+    return { relayed: wirePackets.length, received, peerId: resolvedPeerId };
   }
 
   /** Split a byte array into chunks sized to the negotiated MTU. */

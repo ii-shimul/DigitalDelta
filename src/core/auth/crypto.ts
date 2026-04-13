@@ -121,6 +121,41 @@ export function encodeUtf8(value: string): Uint8Array {
   return Uint8Array.from(bytes);
 }
 
+/**
+ * Decode a UTF-8 Uint8Array back to a string.
+ * Hermes-safe: no TextDecoder dependency.
+ */
+export function decodeUtf8(bytes: Uint8Array): string {
+  let encoded = '';
+  for (let i = 0; i < bytes.length; i++) {
+    const byte = bytes[i]!;
+    if (byte < 0x80) {
+      // ASCII — percent-encode only the few chars that decodeURIComponent expects
+      if (
+        (byte >= 0x30 && byte <= 0x39) || // 0-9
+        (byte >= 0x41 && byte <= 0x5a) || // A-Z
+        (byte >= 0x61 && byte <= 0x7a) || // a-z
+        byte === 0x2d ||
+        byte === 0x5f ||
+        byte === 0x2e ||
+        byte === 0x21 ||
+        byte === 0x7e ||
+        byte === 0x2a ||
+        byte === 0x27 ||
+        byte === 0x28 ||
+        byte === 0x29
+      ) {
+        encoded += String.fromCharCode(byte);
+      } else {
+        encoded += '%' + byte.toString(16).padStart(2, '0').toUpperCase();
+      }
+    } else {
+      encoded += '%' + byte.toString(16).padStart(2, '0').toUpperCase();
+    }
+  }
+  return decodeURIComponent(encoded);
+}
+
 export function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
 }

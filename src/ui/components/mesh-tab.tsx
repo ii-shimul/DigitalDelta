@@ -11,11 +11,14 @@ import {
 import type { RegisteredUser } from '../../api/auth';
 import {
   type MeshMessage,
+  type MeshPeer,
   type NodeRole,
   type NodeRoleLogEntry,
   deliverIncomingMessages,
   evaluateAndLogRole,
+  getForwardableMessages,
   getMeshMessages,
+  getMeshPeers,
   getMeshStats,
   getNodeRoleLog,
   sendMeshMessage,
@@ -23,7 +26,6 @@ import {
 } from '../../api/mesh';
 import { getBleSyncService } from '../../core/mesh/ble-sync';
 import { getBlePeripheral } from '../../core/mesh/ble-peripheral';
-import { getInventory } from '../../api/inventory';
 
 type Props = {
   user: RegisteredUser;
@@ -55,23 +57,38 @@ export function MeshTab({ user }: Props) {
 
   const [messageText, setMessageText] = useState('');
   const [sendDestSelf, setSendDestSelf] = useState(true);
+  const [selectedPeerId, setSelectedPeerId] = useState<string | null>(null);
+  const [peers, setPeers] = useState<MeshPeer[]>([]);
   const [loading, setLoading] = useState(false);
   const [battery, setBattery] = useState(75);
   const [signal, setSignal] = useState(-65);
   const [bleAdvertising, setBleAdvertising] = useState(false);
   const [bleAdStatus, setBleAdStatus] = useState<string | null>(null);
+  const [meshRelayStatus, setMeshRelayStatus] = useState<string | null>(null);
+  const [queueDepth, setQueueDepth] = useState(0);
 
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const loadData = useCallback(async () => {
-    const [msgs, logs, st] = await Promise.all([
+    const [msgs, logs, st, fwd, discoveredPeers] = await Promise.all([
       getMeshMessages(),
       getNodeRoleLog(),
       getMeshStats(user.deviceId),
+      getForwardableMessages(user.deviceId),
+      getMeshPeers(),
     ]);
     setMessages(msgs);
     setRoleLog(logs);
     setStats(st);
+    setQueueDepth(fwd.length);
+    const filteredPeers = discoveredPeers.filter(
+      p => p.deviceId !== user.deviceId,
+    );
+    setPeers(filteredPeers);
+    // Auto-select first peer if none selected yet
+    if (filteredPeers.length > 0) {
+      setSelectedPeerId(prev => prev ?? filteredPeers[0]!.deviceId);
+    }
   }, [user.deviceId]);
 
   useEffect(() => {
@@ -99,17 +116,22 @@ export function MeshTab({ user }: Props) {
     if (!messageText.trim()) {
       return;
     }
+    if (!sendDestSelf && !selectedPeerId) {
+      Alert.alert(
+        'No Peer Selected',
+        'Relay via BLE first to discover peers, then select a destination.',
+      );
+      return;
+    }
     runAction(async () => {
-      const dest = sendDestSelf
-        ? user.deviceId
-        : `VIRTUAL-${user.deviceId.slice(-4)}`;
+      const dest = sendDestSelf ? user.deviceId : selectedPeerId!;
       await sendMeshMessage(user, {
         text: messageText.trim(),
         destinationDeviceId: dest,
       });
       setMessageText('');
     });
-  }, [messageText, sendDestSelf, user, runAction]);
+  }, [messageText, sendDestSelf, selectedPeerId, user, runAction]);
 
   const handleRelay = useCallback(() => {
     runAction(async () => {
@@ -146,6 +168,7 @@ export function MeshTab({ user }: Props) {
   const handleStartAdvertising = useCallback(async () => {
     try {
       setBleAdStatus('Starting…');
+      const { getInventory } = await import('../../api/inventory');
       const items = await getInventory();
       const merged: Record<string, number> = {};
       for (const item of items) {
@@ -155,7 +178,7 @@ export function MeshTab({ user }: Props) {
       }
       await getBleSyncService().startPeripheralMode(JSON.stringify(merged));
       setBleAdvertising(true);
-      setBleAdStatus('Advertising — ready for incoming sync');
+      setBleAdStatus('Advertising — ready for incoming sync & mesh relay');
     } catch (e) {
       setBleAdStatus(null);
       Alert.alert(
@@ -164,6 +187,24 @@ export function MeshTab({ user }: Props) {
       );
     }
   }, []);
+
+  const handleMeshRelay = useCallback(() => {
+    runAction(async () => {
+      setMeshRelayStatus('Scanning for BLE peers…');
+      const result = await getBleSyncService().relayMeshToPeer();
+      if (!result) {
+        setMeshRelayStatus('No peer found');
+        setTimeout(() => setMeshRelayStatus(null), 3000);
+        return;
+      }
+      setMeshRelayStatus(
+        `✓ Relayed ${result.relayed} → peer ${result.peerId.slice(
+          -8,
+        )}, received ${result.received}`,
+      );
+      setTimeout(() => setMeshRelayStatus(null), 5000);
+    });
+  }, [runAction]);
 
   const handleStopAdvertising = useCallback(async () => {
     try {
@@ -185,11 +226,12 @@ export function MeshTab({ user }: Props) {
       {/* BLE Peripheral Advertising */}
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>
-          BLE Advertising (M2.4 Peripheral)
+          BLE Mesh Node (M3.1 Store-and-Forward)
         </Text>
         <Text style={styles.bleDesc}>
-          When advertising, nearby DigitalDelta devices acting as BLE Central
-          can discover and sync with this device directly over GATT.
+          Start advertising to receive mesh packets from peers. Use "Relay via
+          BLE" to scan for a nearby peer and exchange queued messages over
+          Protobuf-encoded GATT.
         </Text>
         {bleAdStatus !== null && (
           <View
@@ -232,6 +274,38 @@ export function MeshTab({ user }: Props) {
             Native BLE Peripheral module not available on this platform.
           </Text>
         )}
+      </View>
+
+      {/* Mesh BLE Relay */}
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>Mesh Relay via BLE (M3.1)</Text>
+        {queueDepth > 0 && (
+          <View style={styles.queueBadge}>
+            <Text style={styles.queueBadgeText}>
+              {queueDepth} message{queueDepth !== 1 ? 's' : ''} in relay queue
+            </Text>
+          </View>
+        )}
+        {meshRelayStatus !== null && (
+          <View style={styles.meshRelayBar}>
+            <Text style={styles.meshRelayText}>{meshRelayStatus}</Text>
+          </View>
+        )}
+        <TouchableOpacity
+          style={[styles.btnPrimary, loading && styles.btnDisabled]}
+          onPress={handleMeshRelay}
+          disabled={loading}
+          activeOpacity={0.8}
+        >
+          <Text style={styles.btnPrimaryText}>
+            {loading ? 'Relaying…' : '🔀 Relay Queue via BLE'}
+          </Text>
+        </TouchableOpacity>
+        <Text style={styles.bleDesc}>
+          Scans for a nearby DigitalDelta peer, connects via BLE GATT, and
+          exchanges Protobuf-encoded MeshBundle packets. Messages are forwarded
+          with TTL/hop tracking and dedup.
+        </Text>
       </View>
 
       {/* Header */}
@@ -357,16 +431,63 @@ export function MeshTab({ user }: Props) {
           </TouchableOpacity>
           <TouchableOpacity
             style={[styles.chip, !sendDestSelf && styles.chipActive]}
-            onPress={() => setSendDestSelf(false)}
+            onPress={() => {
+              setSendDestSelf(false);
+              if (peers.length > 0 && !selectedPeerId) {
+                setSelectedPeerId(peers[0]!.deviceId);
+              }
+            }}
             activeOpacity={0.7}
           >
             <Text
               style={[styles.chipText, !sendDestSelf && styles.chipTextActive]}
             >
-              → Virtual Remote Device
+              → Discovered Peer
             </Text>
           </TouchableOpacity>
         </View>
+        {!sendDestSelf && (
+          <View style={styles.destRow}>
+            {peers.length === 0 ? (
+              <View style={styles.discoverContainer}>
+                <Text style={styles.noPeersText}>
+                  No peers discovered yet. Tap below to scan.
+                </Text>
+                <TouchableOpacity
+                  style={[styles.btnPrimary, loading && styles.btnDisabled]}
+                  onPress={handleMeshRelay}
+                  disabled={loading}
+                  activeOpacity={0.8}
+                >
+                  <Text style={styles.btnPrimaryText}>
+                    {loading ? 'Scanning…' : '📡 Discover Peers via BLE'}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              peers.map(peer => (
+                <TouchableOpacity
+                  key={peer.deviceId}
+                  style={[
+                    styles.chip,
+                    selectedPeerId === peer.deviceId && styles.chipActive,
+                  ]}
+                  onPress={() => setSelectedPeerId(peer.deviceId)}
+                  activeOpacity={0.7}
+                >
+                  <Text
+                    style={[
+                      styles.chipText,
+                      selectedPeerId === peer.deviceId && styles.chipTextActive,
+                    ]}
+                  >
+                    📱 {peer.deviceId.slice(-8)}
+                  </Text>
+                </TouchableOpacity>
+              ))
+            )}
+          </View>
+        )}
         <TouchableOpacity
           style={[
             styles.btnPrimary,
@@ -719,5 +840,43 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: '#e53e3e',
     fontStyle: 'italic',
+  },
+  queueBadge: {
+    backgroundColor: '#fffbeb',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: '#d69e2e',
+  },
+  queueBadgeText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#d69e2e',
+  },
+  meshRelayBar: {
+    backgroundColor: '#ebf8ff',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: '#3182ce',
+  },
+  meshRelayText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#2c5282',
+  },
+  noPeersText: {
+    fontSize: 12,
+    color: '#9da3b0',
+    fontStyle: 'italic',
+    paddingVertical: 4,
+  },
+  discoverContainer: {
+    flex: 1,
+    gap: 8,
   },
 });
