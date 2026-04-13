@@ -179,19 +179,6 @@ export async function updateItemQuantity(
 // this payload would arrive over Bluetooth/Wi-Fi Direct as a Protobuf message.
 // The merge logic is identical regardless of transport.
 
-const SEED_ITEMS = [
-  {
-    name: 'Water Purification Tablets',
-    category: 'Medical',
-    unit: 'pcs',
-    qty: 200,
-  },
-  { name: 'Emergency Food Rations', category: 'Food', unit: 'boxes', qty: 80 },
-  { name: 'First Aid Kits', category: 'Medical', unit: 'kits', qty: 35 },
-  { name: 'Drinking Water (5L)', category: 'Water', unit: 'cans', qty: 150 },
-  { name: 'Tarpaulins', category: 'Shelter', unit: 'pcs', qty: 60 },
-];
-
 export async function simulateSyncFromDevice(): Promise<SyncResult> {
   const db = await getDatabase();
   const remoteDeviceId = genId('REMOTE-');
@@ -276,33 +263,6 @@ export async function simulateSyncFromDevice(): Promise<SyncResult> {
     }
   }
 
-  // --- Inject new items from remote if inventory is sparse ---
-  if (items.length < 3) {
-    const needed = SEED_ITEMS.slice(0, 3 - items.length);
-    for (const template of needed) {
-      const itemId = genId('ITEM-');
-      const clock = tickVectorClock({}, remoteDeviceId);
-      const nowMs = Date.now();
-      await db.execute(
-        `INSERT INTO supply_inventory
-         (inventory_item_id, sku, item_name, category, quantity, unit,
-          storage_node_id, status, vector_clock_json, updated_at_ms, metadata_json)
-         VALUES (?, ?, ?, ?, ?, ?, 'REMOTE', 'available', ?, ?, '{}')`,
-        [
-          itemId,
-          itemId,
-          template.name,
-          template.category,
-          template.qty,
-          template.unit,
-          serializeVectorClock(clock),
-          nowMs,
-        ],
-      );
-      newItems++;
-    }
-  }
-
   return { remoteDeviceId, localWins, remoteWins, conflicts, newItems };
 }
 
@@ -343,20 +303,4 @@ export async function resolveConflict(
       conflict.itemId,
     ],
   );
-}
-
-export async function seedDemoInventory(actorDeviceId: string): Promise<void> {
-  const existing = await getInventory();
-  if (existing.length > 0) {
-    return;
-  }
-  for (const template of SEED_ITEMS) {
-    await addInventoryItem({
-      name: template.name,
-      category: template.category,
-      quantity: template.qty,
-      unit: template.unit,
-      actorDeviceId,
-    });
-  }
 }

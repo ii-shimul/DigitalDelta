@@ -1,18 +1,26 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Alert, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import {
+  Alert,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
+} from 'react-native';
 
 import type { RegisteredUser } from '../../api/auth';
 import {
+  type CargoDraft,
   type CargoRecord,
   type TriageDecisionRecord,
+  addCargo,
   getAllCargo,
   getTriageDecisions,
   injectRouteSlowdown,
   resetTriage,
   runAutonomousTriage,
-  seedDemoCargo,
 } from '../../api/triage';
-import { PRIORITY_META } from '../../core/triage/engine';
+import { PRIORITY_META, type CargoPriority } from '../../core/triage/engine';
 
 type Props = { user: RegisteredUser };
 
@@ -34,7 +42,13 @@ export function TriageTab({ user }: Props) {
   const [cargo, setCargo] = useState<CargoRecord[]>([]);
   const [decisions, setDecisions] = useState<TriageDecisionRecord[]>([]);
   const [loading, setLoading] = useState(false);
-  const [seeded, setSeeded] = useState(false);
+  const [showAdd, setShowAdd] = useState(false);
+
+  // Add-cargo form state
+  const [newLabel, setNewLabel] = useState('');
+  const [newDesc, setNewDesc] = useState('');
+  const [newPriority, setNewPriority] = useState<CargoPriority>('P1');
+  const [newEtaHours, setNewEtaHours] = useState('4');
 
   const load = useCallback(async () => {
     const [c, d] = await Promise.all([getAllCargo(), getTriageDecisions()]);
@@ -43,11 +57,33 @@ export function TriageTab({ user }: Props) {
   }, []);
 
   useEffect(() => {
-    seedDemoCargo(user).then(() => {
-      setSeeded(true);
-      load();
-    });
-  }, [user, load]);
+    load();
+  }, [load]);
+
+  const handleAddCargo = useCallback(async () => {
+    if (!newLabel.trim()) {
+      Alert.alert('Missing Label', 'Enter a cargo label.');
+      return;
+    }
+    const etaH = parseFloat(newEtaHours);
+    if (isNaN(etaH) || etaH <= 0) {
+      Alert.alert('Invalid ETA', 'Enter a positive number of hours.');
+      return;
+    }
+    const draft: CargoDraft = {
+      label: newLabel.trim(),
+      description: newDesc.trim() || undefined,
+      priority: newPriority,
+      etaOffsetMs: etaH * 60 * 60 * 1000,
+    };
+    await addCargo(user, draft);
+    setNewLabel('');
+    setNewDesc('');
+    setNewPriority('P1');
+    setNewEtaHours('4');
+    setShowAdd(false);
+    await load();
+  }, [user, newLabel, newDesc, newPriority, newEtaHours, load]);
 
   const run = useCallback(
     async (action: () => Promise<void>) => {
@@ -146,6 +182,77 @@ export function TriageTab({ user }: Props) {
             </View>
           ))}
         </View>
+      </View>
+
+      {/* Add Cargo */}
+      <View style={styles.section}>
+        <TouchableOpacity
+          style={styles.btnSecondary}
+          onPress={() => setShowAdd(!showAdd)}
+          activeOpacity={0.8}
+        >
+          <Text style={styles.btnSecondaryText}>
+            {showAdd ? '✕ Cancel' : '＋ Add Cargo Item'}
+          </Text>
+        </TouchableOpacity>
+        {showAdd && (
+          <View style={{ marginTop: 10, gap: 8 }}>
+            <TextInput
+              style={styles.formInput}
+              placeholder="Label (e.g. Antivenom Supply)"
+              placeholderTextColor="#9da3b0"
+              value={newLabel}
+              onChangeText={setNewLabel}
+            />
+            <TextInput
+              style={styles.formInput}
+              placeholder="Description (optional)"
+              placeholderTextColor="#9da3b0"
+              value={newDesc}
+              onChangeText={setNewDesc}
+            />
+            <Text style={styles.formLabel}>Priority</Text>
+            <View style={styles.chipRow}>
+              {(['P0', 'P1', 'P2', 'P3'] as const).map(p => (
+                <TouchableOpacity
+                  key={p}
+                  style={[
+                    styles.chip,
+                    newPriority === p && {
+                      backgroundColor: PRIORITY_META[p].color + '22',
+                      borderColor: PRIORITY_META[p].color,
+                    },
+                  ]}
+                  onPress={() => setNewPriority(p)}
+                >
+                  <Text
+                    style={[
+                      styles.chipText,
+                      newPriority === p && { color: PRIORITY_META[p].color },
+                    ]}
+                  >
+                    {p}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            <TextInput
+              style={styles.formInput}
+              placeholder="ETA (hours from now)"
+              placeholderTextColor="#9da3b0"
+              keyboardType="numeric"
+              value={newEtaHours}
+              onChangeText={setNewEtaHours}
+            />
+            <TouchableOpacity
+              style={styles.btnPrimary}
+              onPress={handleAddCargo}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.btnPrimaryText}>Add Cargo</Text>
+            </TouchableOpacity>
+          </View>
+        )}
       </View>
 
       {/* Stats */}
@@ -503,4 +610,20 @@ const styles = StyleSheet.create({
     marginBottom: 6,
   },
   infoText: { fontSize: 12, color: '#565e74', lineHeight: 18 },
+  formInput: {
+    backgroundColor: '#fff',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#c2c6d6',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 13,
+    color: '#131b2e',
+  },
+  formLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#565e74',
+    marginBottom: -2,
+  },
 });

@@ -47,35 +47,6 @@ export type TriageDecisionRecord = {
   deviceId: string;
 };
 
-// ─── Seed demo cargo ─────────────────────────────────────────────────────────
-
-const DEMO_CARGO: CargoDraft[] = [
-  {
-    label: 'Antivenom Supply — Sylhet Central',
-    description: 'Snake antivenom, 200 vials. Camp N4.',
-    priority: 'P0',
-    etaOffsetMs: 1.5 * 60 * 60 * 1000, // 1.5h from now (inside SLA)
-  },
-  {
-    label: 'Surgical Equipment — Netrokona',
-    description: 'Trauma surgery kits × 10.',
-    priority: 'P1',
-    etaOffsetMs: 4 * 60 * 60 * 1000,
-  },
-  {
-    label: 'Water Purification Tablets',
-    description: '50,000 tabs for IDP camp N5.',
-    priority: 'P2',
-    etaOffsetMs: 18 * 60 * 60 * 1000,
-  },
-  {
-    label: 'Relief Blankets & Tarpaulins',
-    description: '500 units. Non-critical comfort supply.',
-    priority: 'P3',
-    etaOffsetMs: 60 * 60 * 60 * 1000,
-  },
-];
-
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function rowToCargoRecord(row: Record<string, unknown>): CargoRecord {
@@ -111,36 +82,32 @@ function rowToDecision(row: Record<string, unknown>): TriageDecisionRecord {
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 /**
- * Seed demo cargo if table is empty.
+ * Add a single cargo item from user input.
  */
-export async function seedDemoCargo(user: RegisteredUser): Promise<void> {
+export async function addCargo(
+  user: RegisteredUser,
+  draft: CargoDraft,
+): Promise<string> {
   const db = await getDatabase();
-  const check = await db.execute('SELECT COUNT(*) as cnt FROM triage_cargo');
-  const cnt = (check.rows[0]?.cnt as number) ?? 0;
-  if (cnt > 0) {
-    return;
-  }
-
   const nowMs = Date.now();
-  for (const draft of DEMO_CARGO) {
-    const cargoId = `CGO-${bytesToHex(randomBytes(4)).toUpperCase()}`;
-    await db.execute(
-      `INSERT INTO triage_cargo
-         (cargo_id, label, description, priority, sla_window_ms, created_at_ms, eta_ms,
-          route_slowdown_pct, status, waypoint_label, resolved_at_ms, device_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'active', NULL, NULL, ?)`,
-      [
-        cargoId,
-        draft.label,
-        draft.description ?? '',
-        draft.priority,
-        PRIORITY_META[draft.priority].slaWindowMs,
-        nowMs,
-        nowMs + draft.etaOffsetMs,
-        user.deviceId,
-      ],
-    );
-  }
+  const cargoId = `CGO-${bytesToHex(randomBytes(4)).toUpperCase()}`;
+  await db.execute(
+    `INSERT INTO triage_cargo
+       (cargo_id, label, description, priority, sla_window_ms, created_at_ms, eta_ms,
+        route_slowdown_pct, status, waypoint_label, resolved_at_ms, device_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'active', NULL, NULL, ?)`,
+    [
+      cargoId,
+      draft.label,
+      draft.description ?? '',
+      draft.priority,
+      PRIORITY_META[draft.priority].slaWindowMs,
+      nowMs,
+      nowMs + draft.etaOffsetMs,
+      user.deviceId,
+    ],
+  );
+  return cargoId;
 }
 
 export async function getAllCargo(): Promise<CargoRecord[]> {

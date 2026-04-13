@@ -169,12 +169,8 @@ export async function createSignedDelivery(
     ],
   );
 
-  // Store nonce as used immediately (M5.2)
-  await db.execute(
-    `INSERT INTO pod_used_nonces (nonce_hex, delivery_id, used_at_ms)
-     VALUES (?, ?, ?)`,
-    [payload.nonce, deliveryId, nowMs],
-  );
+  // NOTE: Nonce is NOT stored here — only the verifier (recipient) tracks
+  // used nonces to detect replays (M5.2). The sender merely signs.
 
   return {
     deliveryId,

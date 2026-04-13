@@ -17,7 +17,6 @@ import {
   getConflicts,
   getInventory,
   resolveConflict,
-  seedDemoInventory,
   simulateSyncFromDevice,
   updateItemQuantity,
 } from '../../api/inventory';
@@ -70,11 +69,6 @@ export function InventoryTab({ user }: Props) {
     loadData();
   }, [loadData]);
 
-  const handleSeedDemo = useCallback(async () => {
-    await seedDemoInventory(user.deviceId);
-    await loadData();
-  }, [user.deviceId, loadData]);
-
   const handleAddItem = useCallback(async () => {
     const qty = parseInt(newQuantity, 10);
     if (!newName.trim() || isNaN(qty) || qty < 0) {
@@ -108,7 +102,7 @@ export function InventoryTab({ user }: Props) {
     if (items.length === 0) {
       Alert.alert(
         'No Items',
-        'Add some items first (or tap "Load Demo Data"), then simulate sync to demonstrate CRDT merging.',
+        'Add some items first, then simulate sync to demonstrate CRDT merging.',
       );
       return;
     }
@@ -272,15 +266,8 @@ export function InventoryTab({ user }: Props) {
           <View style={styles.emptyCard}>
             <Text style={styles.emptyText}>No items yet.</Text>
             <Text style={styles.emptyHint}>
-              Add items manually or load demo data to see CRDT sync in action.
+              Tap "＋ Add Item" above to register supply inventory.
             </Text>
-            <TouchableOpacity
-              style={styles.seedBtn}
-              onPress={handleSeedDemo}
-              activeOpacity={0.8}
-            >
-              <Text style={styles.seedBtnText}>Load Demo Data</Text>
-            </TouchableOpacity>
           </View>
         ) : (
           <>
@@ -599,18 +586,6 @@ const styles = StyleSheet.create({
     color: '#565e74',
     textAlign: 'center',
     lineHeight: 18,
-  },
-  seedBtn: {
-    marginTop: 6,
-    backgroundColor: '#0058be',
-    borderRadius: 10,
-    paddingVertical: 10,
-    paddingHorizontal: 20,
-  },
-  seedBtnText: {
-    color: '#fff',
-    fontWeight: '700',
-    fontSize: 14,
   },
   itemCard: {
     backgroundColor: '#f8f9ff',
