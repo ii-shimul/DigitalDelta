@@ -21,10 +21,36 @@ import type {
   AuthOtpChallenge,
   AuthRole,
   AuthenticatedSession,
+  DeltaSyncCycleResult,
   DashboardScreenData,
+  FleetDroneRequiredZoneSummary,
+  FleetHandoffEventSummary,
+  FleetHandoffTransferSummary,
+  FleetRendezvousPlanSummary,
   LoginScreenData,
+  MeshThrottleSimulationResult,
+  MeshRelaySnapshot,
+  PodChallengeEnvelope,
+  PodReceiptData,
+  PodVerificationOutcome,
+  MeshRoleCycleResult,
+  MeshStoreForwardCycleResult,
+  RoutingEdgeOverview,
+  RoutingOverview,
+  RoutingRecomputeResult,
 } from '../../../api';
-import { AUTH_ROLES, AuthApi, getAvailableAuthRoles } from '../../../api';
+import {
+  AUTH_ROLES,
+  AuthApi,
+  FleetApi,
+  MeshApi,
+  PodApi,
+  RoutingApi,
+  SyncApi,
+  getAvailableAuthRoles,
+  getDashboardScreenData,
+  resolveDashboardConflict,
+} from '../../../api';
 import type { BottomTabScreen } from '../../navigation/contracts';
 import {
   ROLE_ALLOWED_SCREENS,
@@ -42,7 +68,20 @@ type AuthNotice = {
   message: string;
 };
 
+type LiveNotification = {
+  id: string;
+  tone: AuthNotice['tone'];
+  title: string;
+  message: string;
+  occurredAtMs: number;
+};
+
 const authApi = new AuthApi();
+const syncApi = new SyncApi();
+const meshApi = new MeshApi();
+const fleetApi = new FleetApi();
+const routingApi = new RoutingApi();
+const podApi = new PodApi();
 
 const MAIN_TAB_ITEMS: Array<{
   label: string;
@@ -79,9 +118,15 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
     'main',
   );
   const [meshThrottleEnabled, setMeshThrottleEnabled] = useState(true);
-  const [scanDemoState, setScanDemoState] = useState<
-    'idle' | 'success' | 'tamper'
-  >('idle');
+  const [podChallengeEnvelope, setPodChallengeEnvelope] =
+    useState<PodChallengeEnvelope | null>(null);
+  const [podVerificationOutcome, setPodVerificationOutcome] =
+    useState<PodVerificationOutcome | null>(null);
+  const [latestPodReceipt, setLatestPodReceipt] =
+    useState<PodReceiptData | null>(null);
+  const [issuingPodChallenge, setIssuingPodChallenge] = useState(false);
+  const [verifyingPodChallenge, setVerifyingPodChallenge] = useState(false);
+  const [replayingPodChallenge, setReplayingPodChallenge] = useState(false);
   const [expandedConflictId, setExpandedConflictId] = useState<string | null>(
     null,
   );
@@ -91,6 +136,47 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
   const [requestingFieldOtp, setRequestingFieldOtp] = useState(false);
   const [auditTerminalLines, setAuditTerminalLines] = useState<string[]>([]);
   const [nowMs, setNowMs] = useState(() => Date.now());
+  const [liveDashboardData, setLiveDashboardData] =
+    useState<DashboardScreenData>(dashboardData);
+  const [liveNotifications, setLiveNotifications] = useState<LiveNotification[]>(
+    [],
+  );
+  const [syncingMesh, setSyncingMesh] = useState(false);
+  const [lastSyncCycle, setLastSyncCycle] =
+    useState<DeltaSyncCycleResult | null>(null);
+  const [evaluatingMeshRole, setEvaluatingMeshRole] = useState(false);
+  const [runningStoreForward, setRunningStoreForward] = useState(false);
+  const [resumingRelay, setResumingRelay] = useState(false);
+  const [meshRoleCycle, setMeshRoleCycle] =
+    useState<MeshRoleCycleResult | null>(null);
+  const [meshStoreForwardCycle, setMeshStoreForwardCycle] =
+    useState<MeshStoreForwardCycleResult | null>(null);
+  const [meshRelaySnapshot, setMeshRelaySnapshot] =
+    useState<MeshRelaySnapshot | null>(null);
+  const [meshStationaryMode, setMeshStationaryMode] = useState(true);
+  const [meshThrottleSimulation, setMeshThrottleSimulation] =
+    useState<MeshThrottleSimulationResult | null>(null);
+  const [simulatingMeshThrottle, setSimulatingMeshThrottle] = useState(false);
+  const [droneRequiredZones, setDroneRequiredZones] = useState<
+    FleetDroneRequiredZoneSummary[]
+  >([]);
+  const [computingHandoffPlan, setComputingHandoffPlan] = useState(false);
+  const [executingHandoff, setExecutingHandoff] = useState(false);
+  const [handoffPlan, setHandoffPlan] =
+    useState<FleetRendezvousPlanSummary | null>(null);
+  const [handoffTransfer, setHandoffTransfer] =
+    useState<FleetHandoffTransferSummary | null>(null);
+  const [latestHandoffEvent, setLatestHandoffEvent] =
+    useState<FleetHandoffEventSummary | null>(null);
+  const [routingOverview, setRoutingOverview] =
+    useState<RoutingOverview | null>(null);
+  const [lastRoutingRecompute, setLastRoutingRecompute] =
+    useState<RoutingRecomputeResult | null>(null);
+  const [updatingEdgeId, setUpdatingEdgeId] = useState<string | null>(null);
+  const [recomputingActiveRoute, setRecomputingActiveRoute] = useState(false);
+  const [resolvingConflictId, setResolvingConflictId] = useState<string | null>(
+    null,
+  );
   const [requestingOtp, setRequestingOtp] = useState(false);
   const [verifyingOtp, setVerifyingOtp] = useState(false);
   const [rotatingKey, setRotatingKey] = useState(false);
@@ -102,11 +188,22 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
     keyAlgorithm: loginData.keyAlgorithm,
     keyFingerprint: loginData.keyFingerprint,
   });
+  const dashboard = liveDashboardData;
   const isWideLayout = width >= 768;
-  const routeSummary = dashboardData.routes[0];
-  const supplySummaries = dashboardData.supplies.slice(0, 3);
-  const nodeSummaries = dashboardData.nodeHealth.slice(0, 3);
-  const triageAlerts = dashboardData.triageAlerts.slice(0, 3);
+  const routeSummary = dashboard.routes[0];
+  const scannerDeliveryId =
+    routeSummary?.deliveryId ?? dashboard.routes[0]?.deliveryId ?? null;
+  const activeRouteOverview =
+    routingOverview?.routes.find(route => route.routeId === routeSummary?.routeId) ??
+    routingOverview?.routes[0];
+  const routingEdges = routingOverview?.edges.slice(0, 6) ?? [];
+  const supplySummaries = dashboard.supplies.slice(0, 3);
+  const nodeSummaries = dashboard.nodeHealth.slice(0, 3);
+  const primaryNodeBatteryPercent = dashboard.nodeHealth[0]?.batteryPercent;
+  const triageAlerts = dashboard.triageAlerts.slice(0, 3);
+  const activeDroneRequiredZone = scannerDeliveryId
+    ? droneRequiredZones.find(zone => zone.deliveryId === scannerDeliveryId)
+    : undefined;
   const allowedScreens = activeSession
     ? ROLE_ALLOWED_SCREENS[activeSession.activeRole]
     : [];
@@ -116,7 +213,7 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
       : 'Enter 6-digit code'
     : 'Get code';
   const syncTimestampLabel = formatZuluTimestamp(
-    dashboardData.sync.lastSyncedAtMs ?? loginData.lastLoginAtMs,
+    dashboard.sync.lastSyncedAtMs ?? loginData.lastLoginAtMs,
   );
   const containerClassName = isWideLayout
     ? 'w-full max-w-[760px] self-center px-6'
@@ -133,6 +230,66 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
       keyFingerprint: loginData.keyFingerprint,
     });
   }, [loginData]);
+
+  useEffect(() => {
+    setLiveDashboardData(dashboardData);
+  }, [dashboardData]);
+
+  useEffect(() => {
+    let isActive = true;
+
+    const pollDashboard = async () => {
+      try {
+        const nextDashboard = await getDashboardScreenData();
+        if (!isActive) {
+          return;
+        }
+
+        setLiveDashboardData(previousDashboard => {
+          emitRealtimeNotifications(previousDashboard, nextDashboard);
+          return nextDashboard;
+        });
+      } catch {
+        // Keep local state when polling fails; this must not block offline usage.
+      }
+    };
+
+    const timerId = setInterval(pollDashboard, 4000);
+
+    return () => {
+      isActive = false;
+      clearInterval(timerId);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!activeSession) {
+      return;
+    }
+
+    let disposed = false;
+
+    const pollRoutingOverview = async () => {
+      try {
+        const nextOverview = await routingApi.getRoutingOverview();
+        if (disposed) {
+          return;
+        }
+
+        setRoutingOverview(nextOverview);
+      } catch {
+        // Routing overview polling must not block core auth/sync interactions.
+      }
+    };
+
+    void pollRoutingOverview();
+    const timerId = setInterval(pollRoutingOverview, 5000);
+
+    return () => {
+      disposed = true;
+      clearInterval(timerId);
+    };
+  }, [activeSession]);
 
   useEffect(() => {
     if (!otpChallenge) {
@@ -169,6 +326,148 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
     }
   }, [activeSession, selectedTab]);
 
+  useEffect(() => {
+    if (!activeSession || selectedTab !== 'Mesh') {
+      return;
+    }
+
+    void refreshMeshSnapshot();
+  }, [activeSession, selectedTab]);
+
+  useEffect(() => {
+    if (!activeSession || !scannerDeliveryId) {
+      setLatestPodReceipt(null);
+      return;
+    }
+
+    void refreshLatestPodReceipt(scannerDeliveryId);
+  }, [activeSession, scannerDeliveryId]);
+
+  useEffect(() => {
+    if (!activeSession) {
+      setDroneRequiredZones([]);
+      return;
+    }
+
+    let disposed = false;
+
+    const refreshDroneRequiredZones = async () => {
+      try {
+        const zones = await fleetApi.analyzeDroneRequiredZones({
+          loginData,
+          session: activeSession,
+        });
+
+        if (disposed) {
+          return;
+        }
+
+        setDroneRequiredZones(zones);
+      } catch {
+        // Reachability scan is best-effort and should not block other panels.
+      }
+    };
+
+    void refreshDroneRequiredZones();
+    const timerId = setInterval(refreshDroneRequiredZones, 12_000);
+
+    return () => {
+      disposed = true;
+      clearInterval(timerId);
+    };
+  }, [activeSession, loginData]);
+
+  useEffect(() => {
+    if (!activeSession || !scannerDeliveryId) {
+      setLatestHandoffEvent(null);
+      setHandoffPlan(null);
+      setHandoffTransfer(null);
+      return;
+    }
+
+    let disposed = false;
+
+    const refreshLatestHandoffEvent = async () => {
+      try {
+        const event = await fleetApi.getLatestHandoffEvent({
+          loginData,
+          session: activeSession,
+          deliveryId: scannerDeliveryId,
+        });
+        if (disposed) {
+          return;
+        }
+
+        setLatestHandoffEvent(event);
+      } catch {
+        // Handoff panel can continue without latest event details.
+      }
+    };
+
+    void refreshLatestHandoffEvent();
+
+    return () => {
+      disposed = true;
+    };
+  }, [activeSession, loginData, scannerDeliveryId]);
+
+  useEffect(() => {
+    if (!activeSession) {
+      return;
+    }
+
+    let disposed = false;
+
+    const autoEvaluateRole = async () => {
+      try {
+        const batteryBaseline = primaryNodeBatteryPercent ?? 74;
+        const result = await meshApi.evaluateNodeRole({
+          loginData,
+          session: activeSession,
+          batteryPercent: meshThrottleEnabled
+            ? Math.max(18, batteryBaseline - 20)
+            : batteryBaseline,
+          signalStrength: estimateSignalStrength(dashboard),
+          nearbyPeerCount: dashboard.sync.peerCount,
+        });
+
+        if (disposed) {
+          return;
+        }
+
+        setMeshRoleCycle(result);
+
+        if (result.changed) {
+          pushLiveNotification({
+            tone: 'success',
+            title: 'Auto role switch',
+            message: `${result.previousRole ?? 'unknown'} -> ${result.role} · score ${result.relayScore.toFixed(1)}`,
+          });
+          await refreshMeshSnapshot();
+        }
+      } catch {
+        // Automatic role checks should not interrupt the UI workflow.
+      }
+    };
+
+    void autoEvaluateRole();
+    const timerId = setInterval(() => {
+      void autoEvaluateRole();
+    }, 12000);
+
+    return () => {
+      disposed = true;
+      clearInterval(timerId);
+    };
+  }, [
+    activeSession,
+    dashboard.connectivityState,
+    dashboard.sync.peerCount,
+    loginData,
+    meshThrottleEnabled,
+    primaryNodeBatteryPercent,
+  ]);
+
   const remainingSeconds = otpChallenge
     ? Math.max(0, Math.ceil((otpChallenge.expiresAtMs - nowMs) / 1000))
     : 0;
@@ -178,6 +477,104 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
         Math.ceil((fieldOtpChallenge.expiresAtMs - fieldOtpNowMs) / 1000),
       )
     : 0;
+
+  function pushLiveNotification(input: {
+    tone: LiveNotification['tone'];
+    title: string;
+    message: string;
+  }) {
+    const event: LiveNotification = {
+      id: `ntf-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      tone: input.tone,
+      title: input.title,
+      message: input.message,
+      occurredAtMs: Date.now(),
+    };
+
+    setLiveNotifications(previous => [event, ...previous].slice(0, 24));
+  }
+
+  function emitRealtimeNotifications(
+    previousDashboard: DashboardScreenData,
+    nextDashboard: DashboardScreenData,
+  ) {
+    if (previousDashboard.connectivityState !== nextDashboard.connectivityState) {
+      pushLiveNotification({
+        tone:
+          nextDashboard.connectivityState === 'verified'
+            ? 'success'
+            : nextDashboard.connectivityState === 'conflict-detected'
+              ? 'warning'
+              : 'default',
+        title: 'Connectivity state updated',
+        message: `${formatConnectivityLabel(previousDashboard.connectivityState)} -> ${formatConnectivityLabel(nextDashboard.connectivityState)}`,
+      });
+    }
+
+    if (
+      nextDashboard.sync.lastSyncedAtMs &&
+      nextDashboard.sync.lastSyncedAtMs !== previousDashboard.sync.lastSyncedAtMs
+    ) {
+      pushLiveNotification({
+        tone: 'success',
+        title: 'Sync verified',
+        message: `Last synced ${formatZuluTimestamp(nextDashboard.sync.lastSyncedAtMs)}`,
+      });
+    }
+
+    if (
+      nextDashboard.sync.queuedEnvelopeCount !==
+        previousDashboard.sync.queuedEnvelopeCount ||
+      nextDashboard.sync.inFlightEnvelopeCount !==
+        previousDashboard.sync.inFlightEnvelopeCount
+    ) {
+      pushLiveNotification({
+        tone: 'default',
+        title: 'Sync queue changed',
+        message: `Queued ${nextDashboard.sync.queuedEnvelopeCount} · In flight ${nextDashboard.sync.inFlightEnvelopeCount}`,
+      });
+    }
+
+    const unresolvedBefore = previousDashboard.conflicts.filter(
+      conflict => !conflict.resolvedAtMs,
+    ).length;
+    const unresolvedNow = nextDashboard.conflicts.filter(
+      conflict => !conflict.resolvedAtMs,
+    ).length;
+
+    if (unresolvedNow > unresolvedBefore) {
+      pushLiveNotification({
+        tone: 'warning',
+        title: 'New conflict detected',
+        message: `${unresolvedNow} unresolved conflict${unresolvedNow === 1 ? '' : 's'}`,
+      });
+    }
+
+    if (unresolvedNow < unresolvedBefore) {
+      pushLiveNotification({
+        tone: 'success',
+        title: 'Conflict resolved',
+        message: `${unresolvedNow} unresolved conflict${unresolvedNow === 1 ? '' : 's'} remaining`,
+      });
+    }
+
+    const previousRoute = previousDashboard.routes[0];
+    const nextRoute = nextDashboard.routes[0];
+    if (
+      nextRoute &&
+      (!previousRoute ||
+        previousRoute.routeId !== nextRoute.routeId ||
+        previousRoute.etaMinutes !== nextRoute.etaMinutes ||
+        previousRoute.totalRiskScore !== nextRoute.totalRiskScore ||
+        previousRoute.computedAtMs !== nextRoute.computedAtMs)
+    ) {
+      pushLiveNotification({
+        tone: 'success',
+        title: 'Route recomputed',
+        message: `${nextRoute.deliveryId} · ETA ${nextRoute.etaMinutes ?? '—'}m · risk ${formatRisk(nextRoute.totalRiskScore)}`,
+      });
+    }
+  }
 
   async function handleRequestOtp() {
     setRequestingOtp(true);
@@ -196,12 +593,25 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
         title: 'Code issued',
         message: 'Use the alert dialog or enter the code below.',
       });
+      pushLiveNotification({
+        tone: 'success',
+        title: 'OTP issued',
+        message: `Role ${formatRoleLabel(challenge.requestedRole)} · expires in ${Math.max(0, Math.ceil((challenge.expiresAtMs - Date.now()) / 1000))}s`,
+      });
       notifyOtpCode(challenge);
       setNowMs(Date.now());
     } catch (error) {
       setAuthNotice({
         tone: 'danger',
         title: 'Unable to issue OTP',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'The auth service could not issue an OTP.',
+      });
+      pushLiveNotification({
+        tone: 'danger',
+        title: 'OTP request failed',
         message:
           error instanceof Error
             ? error.message
@@ -257,6 +667,11 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
         title: 'Signed in',
         message: `Session active · ${formatRoleLabel(result.session.activeRole)}`,
       });
+      pushLiveNotification({
+        tone: 'success',
+        title: 'Login verified',
+        message: `${formatRoleLabel(result.session.activeRole)} access granted`,
+      });
       setKeySnapshot(previousSnapshot => ({
         keyProvisioned: true,
         keyAlgorithm:
@@ -274,6 +689,14 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
       setAuthNotice({
         tone: 'danger',
         title: 'Verification failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'The auth service could not verify the OTP.',
+      });
+      pushLiveNotification({
+        tone: 'danger',
+        title: 'OTP verification failed',
         message:
           error instanceof Error
             ? error.message
@@ -299,8 +722,21 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
         title: 'Key rotated',
         message: 'New device key stored and registered.',
       });
+      pushLiveNotification({
+        tone: 'success',
+        title: 'Device key rotated',
+        message: identity.keyFingerprint,
+      });
     } catch (error) {
       setAuthNotice({
+        tone: 'danger',
+        title: 'Key rotation failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'The secure key vault could not rotate the device key.',
+      });
+      pushLiveNotification({
         tone: 'danger',
         title: 'Key rotation failed',
         message:
@@ -340,8 +776,23 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
           ? `${nextAuditStatus.scannedEntries} entries OK`
           : `Broken chain at ${nextAuditStatus.brokenLogId ?? 'unknown'}`,
       });
+      pushLiveNotification({
+        tone: nextAuditStatus.valid ? 'success' : 'danger',
+        title: nextAuditStatus.valid ? 'Audit chain verified' : 'Audit chain failed',
+        message: nextAuditStatus.valid
+          ? `${nextAuditStatus.scannedEntries} entries checked`
+          : `Broken at ${nextAuditStatus.brokenLogId ?? 'unknown'}`,
+      });
     } catch (error) {
       setAuthNotice({
+        tone: 'danger',
+        title: 'Audit verification failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'The audit chain could not be checked.',
+      });
+      pushLiveNotification({
         tone: 'danger',
         title: 'Audit verification failed',
         message:
@@ -377,6 +828,13 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
           ? `Entry ${result.logId} modified. Run verify.`
           : 'No audit entries.',
       });
+      pushLiveNotification({
+        tone: result.corrupted ? 'warning' : 'default',
+        title: result.corrupted ? 'Audit tamper injected' : 'No audit entry available',
+        message: result.corrupted
+          ? `Target ${result.logId}`
+          : 'No audit entries to corrupt.',
+      });
     } catch (error) {
       setAuthNotice({
         tone: 'danger',
@@ -386,8 +844,850 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
             ? error.message
             : 'The demo corruption step could not be applied.',
       });
+      pushLiveNotification({
+        tone: 'danger',
+        title: 'Tamper injection failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'The demo corruption step could not be applied.',
+      });
     } finally {
       setInjectingAuditCorruption(false);
+    }
+  }
+
+  async function handleResolveConflict(
+    conflictId: string,
+    resolution: 'local' | 'remote' | 'merged' | 'manual',
+  ) {
+    if (!activeSession) {
+      return;
+    }
+
+    setResolvingConflictId(conflictId);
+
+    try {
+      await resolveDashboardConflict({
+        conflictId,
+        resolution,
+        actor: {
+          userId: activeSession.userId,
+          deviceId: activeSession.deviceId,
+          role: activeSession.activeRole,
+        },
+      });
+
+      const refreshedDashboard = await getDashboardScreenData();
+      setLiveDashboardData(previousDashboard => {
+        emitRealtimeNotifications(previousDashboard, refreshedDashboard);
+        return refreshedDashboard;
+      });
+
+      setAuthNotice({
+        tone: 'success',
+        title: 'Conflict resolved',
+        message: `${conflictId} resolved using ${resolution}.`,
+      });
+      pushLiveNotification({
+        tone: 'success',
+        title: 'Conflict resolution committed',
+        message: `${conflictId} -> ${resolution}`,
+      });
+    } catch (error) {
+      setAuthNotice({
+        tone: 'danger',
+        title: 'Conflict resolution failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Could not resolve the selected conflict.',
+      });
+      pushLiveNotification({
+        tone: 'danger',
+        title: 'Conflict resolution failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Could not resolve the selected conflict.',
+      });
+    } finally {
+      setResolvingConflictId(null);
+    }
+  }
+
+  async function refreshMeshSnapshot() {
+    if (!activeSession) {
+      return;
+    }
+
+    try {
+      const snapshot = await meshApi.getRelaySnapshot({
+        loginData,
+        session: activeSession,
+        limit: 18,
+      });
+      setMeshRelaySnapshot(snapshot);
+    } catch {
+      // Mesh telemetry is best-effort and should not break the screen.
+    }
+  }
+
+  async function handleEvaluateMeshRole() {
+    if (!activeSession) {
+      return;
+    }
+
+    setEvaluatingMeshRole(true);
+
+    try {
+      const batteryBaseline = dashboard.nodeHealth[0]?.batteryPercent ?? 74;
+      const result = await meshApi.evaluateNodeRole({
+        loginData,
+        session: activeSession,
+        batteryPercent: meshThrottleEnabled
+          ? Math.max(18, batteryBaseline - 20)
+          : batteryBaseline,
+        signalStrength: estimateSignalStrength(dashboard),
+        nearbyPeerCount: dashboard.sync.peerCount,
+      });
+
+      setMeshRoleCycle(result);
+      await refreshMeshSnapshot();
+
+      setAuthNotice({
+        tone: result.changed ? 'success' : 'default',
+        title: result.changed ? 'Mesh role switched' : 'Mesh role unchanged',
+        message: `Role ${result.role.toUpperCase()} · score ${result.relayScore.toFixed(1)} · battery ${result.batteryPercent}% · signal ${result.signalStrength}%`,
+      });
+      pushLiveNotification({
+        tone: result.changed ? 'success' : 'default',
+        title: 'Role heuristic evaluated',
+        message: `${result.previousRole ?? 'unknown'} -> ${result.role} · score ${result.relayScore.toFixed(1)}`,
+      });
+    } catch (error) {
+      setAuthNotice({
+        tone: 'danger',
+        title: 'Mesh role evaluation failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Role heuristic execution failed.',
+      });
+      pushLiveNotification({
+        tone: 'danger',
+        title: 'Mesh role evaluation failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Role heuristic execution failed.',
+      });
+    } finally {
+      setEvaluatingMeshRole(false);
+    }
+  }
+
+  async function handleRunStoreForward(options: {
+    relayOnline: boolean;
+    recipientOnline: boolean;
+  }) {
+    if (!activeSession) {
+      return;
+    }
+
+    setRunningStoreForward(true);
+
+    try {
+      const cycle = await meshApi.runStoreForwardCycle({
+        loginData,
+        session: activeSession,
+        relayDeviceId: meshRelaySnapshot?.devices.relayDeviceId,
+        recipientDeviceId: meshRelaySnapshot?.devices.recipientDeviceId,
+        relayOnline: options.relayOnline,
+        recipientOnline: options.recipientOnline,
+      });
+
+      setMeshStoreForwardCycle(cycle);
+      await refreshMeshSnapshot();
+
+      const tone: AuthNotice['tone'] = cycle.delivered
+        ? 'success'
+        : cycle.relayStored || !options.relayOnline
+          ? 'warning'
+          : 'default';
+      setAuthNotice({
+        tone,
+        title: cycle.delivered
+          ? 'Store-forward delivered'
+          : 'Store-forward queued',
+        message: `Packet ${cycle.packetId} · sender ${cycle.senderDispatches} · relay ${cycle.relayDispatches} · delivered ${String(cycle.delivered)}`,
+      });
+      pushLiveNotification({
+        tone,
+        title: 'Store-forward cycle executed',
+        message: `relayOnline=${String(options.relayOnline)} · recipientOnline=${String(options.recipientOnline)} · delivered=${String(cycle.delivered)}`,
+      });
+    } catch (error) {
+      setAuthNotice({
+        tone: 'danger',
+        title: 'Store-forward failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Unable to run encrypted store-forward cycle.',
+      });
+      pushLiveNotification({
+        tone: 'danger',
+        title: 'Store-forward failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Unable to run encrypted store-forward cycle.',
+      });
+    } finally {
+      setRunningStoreForward(false);
+    }
+  }
+
+  async function handleResumeRelayForwarding() {
+    if (!activeSession) {
+      return;
+    }
+
+    const relayDeviceId = meshRelaySnapshot?.devices.relayDeviceId;
+    if (!relayDeviceId) {
+      setAuthNotice({
+        tone: 'warning',
+        title: 'No relay node selected',
+        message: 'Evaluate role or run one cycle to discover relay peers.',
+      });
+      return;
+    }
+
+    setResumingRelay(true);
+
+    try {
+      const result = await meshApi.resumeRelayForwarding({
+        senderDeviceId: activeSession.deviceId,
+        relayDeviceId,
+        recipientDeviceId: meshRelaySnapshot?.devices.recipientDeviceId,
+        recipientOnline: true,
+      });
+
+      await refreshMeshSnapshot();
+
+      setAuthNotice({
+        tone: result.delivered ? 'success' : 'default',
+        title: result.delivered
+          ? 'Relay resumed and delivered'
+          : 'Relay resumed',
+        message: `Sender ${result.senderDispatches} · relay ${result.relayDispatches} · delivered ${String(result.delivered)}`,
+      });
+      pushLiveNotification({
+        tone: result.delivered ? 'success' : 'default',
+        title: 'Relay forwarding resumed',
+        message: `sender=${result.senderDispatches} · relay=${result.relayDispatches} · delivered=${String(result.delivered)}`,
+      });
+    } catch (error) {
+      setAuthNotice({
+        tone: 'danger',
+        title: 'Relay resume failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Unable to resume relay forwarding.',
+      });
+      pushLiveNotification({
+        tone: 'danger',
+        title: 'Relay resume failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Unable to resume relay forwarding.',
+      });
+    } finally {
+      setResumingRelay(false);
+    }
+  }
+
+  async function handleSimulateMeshThrottle() {
+    if (!activeSession) {
+      return;
+    }
+
+    setSimulatingMeshThrottle(true);
+
+    try {
+      const batteryBaseline = dashboard.nodeHealth[0]?.batteryPercent ?? 74;
+      const simulation = await meshApi.simulateBatteryAwareThrottle({
+        loginData,
+        session: activeSession,
+        batteryPercent: meshThrottleEnabled
+          ? Math.min(28, batteryBaseline)
+          : batteryBaseline,
+        signalStrength: estimateSignalStrength(dashboard),
+        nearbyPeerCount: dashboard.sync.peerCount,
+        stationary: meshStationaryMode,
+        durationMinutes: 10,
+      });
+
+      setMeshThrottleSimulation(simulation);
+
+      setAuthNotice({
+        tone: simulation.batterySavedPercent > 0 ? 'success' : 'default',
+        title: 'Mesh throttle simulation complete',
+        message: `10 min run · baseline ${simulation.baseline.broadcastCount} broadcasts -> throttled ${simulation.throttled.broadcastCount} · saved ${simulation.batterySavedPercent.toFixed(2)}% battery`,
+      });
+      pushLiveNotification({
+        tone: simulation.batterySavedPercent > 0 ? 'success' : 'default',
+        title: 'Battery-aware throttle measured',
+        message: `saved ${simulation.batterySavedPercent.toFixed(2)}% over 10 minutes`,
+      });
+    } catch (error) {
+      setAuthNotice({
+        tone: 'danger',
+        title: 'Mesh throttle simulation failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Unable to simulate battery-aware mesh throttle.',
+      });
+      pushLiveNotification({
+        tone: 'danger',
+        title: 'Mesh throttle simulation failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Unable to simulate battery-aware mesh throttle.',
+      });
+    } finally {
+      setSimulatingMeshThrottle(false);
+    }
+  }
+
+  async function handleComputeRendezvousPlan() {
+    if (!activeSession || !scannerDeliveryId) {
+      return;
+    }
+
+    setComputingHandoffPlan(true);
+
+    try {
+      const plan = await fleetApi.computeOptimalRendezvousPlan({
+        loginData,
+        session: activeSession,
+        deliveryId: scannerDeliveryId,
+      });
+
+      setHandoffPlan(plan);
+
+      const latestEvent = await fleetApi.getLatestHandoffEvent({
+        loginData,
+        session: activeSession,
+        deliveryId: scannerDeliveryId,
+      });
+      setLatestHandoffEvent(latestEvent);
+
+      await Promise.all([refreshRoutingOverview(), refreshMeshSnapshot()]);
+
+      setAuthNotice({
+        tone: plan.feasible ? 'success' : 'warning',
+        title: plan.feasible ? 'Rendezvous computed' : 'Rendezvous unavailable',
+        message: plan.feasible
+          ? `${plan.rendezvousNodeId} · total ETA ${plan.totalEtaMinutes}m · ${plan.sourceVehicleId} -> ${plan.targetVehicleId}`
+          : plan.reason ?? 'No feasible rendezvous satisfies drone constraints.',
+      });
+      pushLiveNotification({
+        tone: plan.feasible ? 'success' : 'warning',
+        title: 'Hybrid handoff plan',
+        message: plan.feasible
+          ? `${plan.rendezvousNodeId} computed for ${scannerDeliveryId}`
+          : plan.reason ?? 'No feasible handoff plan',
+      });
+    } catch (error) {
+      setAuthNotice({
+        tone: 'danger',
+        title: 'Rendezvous computation failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Unable to compute hybrid rendezvous plan.',
+      });
+      pushLiveNotification({
+        tone: 'danger',
+        title: 'Rendezvous computation failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Unable to compute hybrid rendezvous plan.',
+      });
+    } finally {
+      setComputingHandoffPlan(false);
+    }
+  }
+
+  async function handleExecuteHandoffTransfer() {
+    if (!activeSession || !scannerDeliveryId) {
+      return;
+    }
+
+    setExecutingHandoff(true);
+
+    try {
+      const result = await fleetApi.executeHandoffTransfer({
+        loginData,
+        session: activeSession,
+        deliveryId: scannerDeliveryId,
+      });
+      setHandoffTransfer(result);
+
+      const [latestEvent, refreshedDashboard] = await Promise.all([
+        fleetApi.getLatestHandoffEvent({
+          loginData,
+          session: activeSession,
+          deliveryId: scannerDeliveryId,
+        }),
+        getDashboardScreenData(),
+      ]);
+
+      setLatestHandoffEvent(latestEvent);
+      setLiveDashboardData(previousDashboard => {
+        emitRealtimeNotifications(previousDashboard, refreshedDashboard);
+        return refreshedDashboard;
+      });
+
+      await Promise.all([
+        refreshLatestPodReceipt(scannerDeliveryId),
+        refreshRoutingOverview(),
+        refreshMeshSnapshot(),
+      ]);
+
+      setAuthNotice({
+        tone: 'success',
+        title: 'Handoff ownership transferred',
+        message: `${result.handoffId} · receipt ${result.receiptId} · event ${result.ownershipTransferEventId}`,
+      });
+      pushLiveNotification({
+        tone: 'success',
+        title: 'Hybrid handoff completed',
+        message: `${scannerDeliveryId} transferred to ${result.targetVehicleId}`,
+      });
+    } catch (error) {
+      setAuthNotice({
+        tone: 'danger',
+        title: 'Handoff transfer failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Unable to execute handoff ownership transfer.',
+      });
+      pushLiveNotification({
+        tone: 'danger',
+        title: 'Handoff transfer failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Unable to execute handoff ownership transfer.',
+      });
+    } finally {
+      setExecutingHandoff(false);
+    }
+  }
+
+  async function handleRunMeshSync() {
+    if (!activeSession) {
+      return;
+    }
+
+    setSyncingMesh(true);
+
+    try {
+      const result = await syncApi.runDeltaSyncCycle({
+        loginData,
+        session: activeSession,
+        transport: 'bluetooth_le',
+        listenWindowMs: 5000,
+      });
+
+      setLastSyncCycle(result);
+
+      const refreshedDashboard = await getDashboardScreenData();
+      setLiveDashboardData(previousDashboard => {
+        emitRealtimeNotifications(previousDashboard, refreshedDashboard);
+        return refreshedDashboard;
+      });
+
+      setAuthNotice({
+        tone: result.conflictsDetected > 0 ? 'warning' : 'success',
+        title:
+          result.conflictsDetected > 0
+            ? 'Sync completed with conflicts'
+            : 'Sync completed',
+        message: `Peer ${result.peerDeviceId} · Exported ${result.exportedEventCount} · Imported ${result.importedEventCount} · ${result.envelopeSizeBytes} bytes · BLE ${result.transportSent ? 'sent' : 'pending'}`,
+      });
+      pushLiveNotification({
+        tone: result.conflictsDetected > 0 ? 'warning' : 'success',
+        title: 'Delta sync cycle finished',
+        message: `${result.transport} · sent=${String(result.transportSent)} · exported ${result.exportedEventCount} · imported ${result.importedEventCount} · conflicts ${result.conflictsDetected}`,
+      });
+    } catch (error) {
+      setAuthNotice({
+        tone: 'danger',
+        title: 'Sync failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Sync engine failed to complete this cycle.',
+      });
+      pushLiveNotification({
+        tone: 'danger',
+        title: 'Sync failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Sync engine failed to complete this cycle.',
+      });
+    } finally {
+      setSyncingMesh(false);
+    }
+  }
+
+  async function refreshRoutingOverview() {
+    try {
+      const overview = await routingApi.getRoutingOverview();
+      setRoutingOverview(overview);
+    } catch {
+      // Routing view refresh is best-effort and should not block user flow.
+    }
+  }
+
+  async function handleUpdateRouteEdgeStatus(input: {
+    edge: RoutingEdgeOverview;
+    status: RoutingEdgeOverview['status'];
+  }) {
+    if (!activeSession) {
+      return;
+    }
+
+    setUpdatingEdgeId(input.edge.edgeId);
+
+    try {
+      const riskScore =
+        input.status === 'washed_out' || input.status === 'impassable'
+          ? Math.max(input.edge.riskScore, 0.98)
+          : input.status === 'degraded'
+            ? Math.max(input.edge.riskScore, 0.55)
+            : input.edge.riskScore;
+      const travelTimeMinutes =
+        input.status === 'washed_out' || input.status === 'impassable'
+          ? 9_999
+          : input.status === 'degraded'
+            ? Math.max(input.edge.travelTimeMinutes, Math.round(input.edge.travelTimeMinutes * 1.35))
+            : input.edge.travelTimeMinutes;
+
+      const result = await routingApi.updateEdgeStatusAndRecompute({
+        loginData,
+        session: activeSession,
+        edgeId: input.edge.edgeId,
+        status: input.status,
+        riskScore,
+        travelTimeMinutes,
+      });
+      setLastRoutingRecompute(result);
+
+      const preemptedEvaluations = result.triageEvaluations.filter(
+        evaluation => evaluation.decision?.preempted,
+      );
+      if (preemptedEvaluations.length > 0) {
+        const firstDecision = preemptedEvaluations[0]?.decision;
+        pushLiveNotification({
+          tone: 'warning',
+          title: 'Autonomous triage preemption',
+          message: `${preemptedEvaluations.length} route(s) preempted · dropped ${firstDecision?.droppedCargoIds.length ?? 0} cargo at ${firstDecision?.safeWaypointNodeId ?? 'safe waypoint'}`,
+        });
+      }
+
+      const [refreshedDashboard] = await Promise.all([
+        getDashboardScreenData(),
+        refreshRoutingOverview(),
+      ]);
+
+      setLiveDashboardData(previousDashboard => {
+        emitRealtimeNotifications(previousDashboard, refreshedDashboard);
+        return refreshedDashboard;
+      });
+
+      setAuthNotice({
+        tone: result.withinTwoSeconds ? 'success' : 'warning',
+        title: 'Route graph updated',
+        message: `${input.edge.edgeId} -> ${formatStatusLabel(input.status)} · recompute ${result.recomputeDurationMs}ms · affected ${result.affectedRoutes.length}`,
+      });
+      pushLiveNotification({
+        tone: result.withinTwoSeconds ? 'success' : 'warning',
+        title: 'Edge status changed',
+        message: `${input.edge.edgeId} ${formatStatusLabel(input.status)} · ${result.recomputeDurationMs}ms`,
+      });
+    } catch (error) {
+      setAuthNotice({
+        tone: 'danger',
+        title: 'Edge update failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Unable to update edge status and recompute routes.',
+      });
+      pushLiveNotification({
+        tone: 'danger',
+        title: 'Route update failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Unable to update edge status and recompute routes.',
+      });
+    } finally {
+      setUpdatingEdgeId(null);
+    }
+  }
+
+  async function handleRecomputeActiveRoute() {
+    if (!activeSession || !routeSummary?.routeId) {
+      return;
+    }
+
+    setRecomputingActiveRoute(true);
+
+    try {
+      const startedAtMs = Date.now();
+      const recomputedRoute = await routingApi.recomputeRoute({
+        loginData,
+        session: activeSession,
+        routeId: routeSummary.routeId,
+      });
+      const durationMs = Date.now() - startedAtMs;
+
+      setLastRoutingRecompute({
+        edgeId: 'manual-recompute',
+        updatedStatus: 'open',
+        updatedAtMs: Date.now(),
+        recomputeDurationMs: durationMs,
+        withinTwoSeconds: durationMs <= 2_000,
+        affectedRoutes: [recomputedRoute],
+        routeEventIds: [],
+        edgeEventId: 'manual-recompute',
+        triageEvaluations: [],
+      });
+
+      const [refreshedDashboard] = await Promise.all([
+        getDashboardScreenData(),
+        refreshRoutingOverview(),
+      ]);
+
+      setLiveDashboardData(previousDashboard => {
+        emitRealtimeNotifications(previousDashboard, refreshedDashboard);
+        return refreshedDashboard;
+      });
+
+      setAuthNotice({
+        tone: durationMs <= 2_000 ? 'success' : 'warning',
+        title: 'Route recomputed',
+        message: `${recomputedRoute.routeId} recalculated in ${durationMs}ms · ETA ${recomputedRoute.totalEtaMinutes}m`,
+      });
+      pushLiveNotification({
+        tone: durationMs <= 2_000 ? 'success' : 'warning',
+        title: 'Manual route recompute',
+        message: `${recomputedRoute.routeId} · ${durationMs}ms`,
+      });
+    } catch (error) {
+      setAuthNotice({
+        tone: 'danger',
+        title: 'Route recompute failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Unable to recompute the active route.',
+      });
+      pushLiveNotification({
+        tone: 'danger',
+        title: 'Manual recompute failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Unable to recompute the active route.',
+      });
+    } finally {
+      setRecomputingActiveRoute(false);
+    }
+  }
+
+  async function refreshLatestPodReceipt(deliveryId: string) {
+    if (!activeSession) {
+      return;
+    }
+
+    try {
+      const latestReceipt = await podApi.getLatestReceipt({
+        loginData,
+        session: activeSession,
+        deliveryId,
+      });
+      setLatestPodReceipt(latestReceipt);
+    } catch {
+      // PoD receipt refresh should not block core scanner operations.
+    }
+  }
+
+  async function handleGeneratePodChallenge() {
+    if (!activeSession) {
+      return;
+    }
+
+    if (!scannerDeliveryId) {
+      setAuthNotice({
+        tone: 'warning',
+        title: 'No active delivery',
+        message: 'Select a delivery route before issuing a proof challenge.',
+      });
+      return;
+    }
+
+    setIssuingPodChallenge(true);
+    setAuthNotice(null);
+
+    try {
+      const challenge = await podApi.createSignedChallenge({
+        loginData,
+        session: activeSession,
+        deliveryId: scannerDeliveryId,
+      });
+
+      setPodChallengeEnvelope(challenge);
+      setPodVerificationOutcome({
+        receiptId: challenge.receiptId,
+        challengeId: challenge.challengeId,
+        deliveryId: challenge.deliveryId,
+        state: 'challenge-generated',
+      });
+
+      await Promise.all([
+        refreshLatestPodReceipt(challenge.deliveryId),
+        (async () => {
+          const refreshedDashboard = await getDashboardScreenData();
+          setLiveDashboardData(previousDashboard => {
+            emitRealtimeNotifications(previousDashboard, refreshedDashboard);
+            return refreshedDashboard;
+          });
+        })(),
+      ]);
+
+      setAuthNotice({
+        tone: 'success',
+        title: 'Challenge signed',
+        message: `Challenge ${challenge.challengeId} issued for ${challenge.deliveryId}.`,
+      });
+      pushLiveNotification({
+        tone: 'success',
+        title: 'PoD challenge generated',
+        message: `${challenge.deliveryId} · ${challenge.challengeId}`,
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Unable to generate proof-of-delivery challenge.';
+
+      setAuthNotice({
+        tone: 'danger',
+        title: 'Challenge failed',
+        message,
+      });
+      pushLiveNotification({
+        tone: 'danger',
+        title: 'PoD challenge failed',
+        message,
+      });
+    } finally {
+      setIssuingPodChallenge(false);
+    }
+  }
+
+  async function handleVerifyPodChallenge(options?: { replay?: boolean }) {
+    if (!activeSession || !podChallengeEnvelope) {
+      return;
+    }
+
+    if (options?.replay) {
+      setReplayingPodChallenge(true);
+    } else {
+      setVerifyingPodChallenge(true);
+    }
+    setAuthNotice(null);
+
+    try {
+      const result = await podApi.verifyScannedChallenge({
+        loginData,
+        session: activeSession,
+        challengePayload: podChallengeEnvelope.qrPayload,
+      });
+      setPodVerificationOutcome(result);
+
+      const targetDeliveryId = result.deliveryId ?? podChallengeEnvelope.deliveryId;
+      await Promise.all([
+        refreshLatestPodReceipt(targetDeliveryId),
+        (async () => {
+          const refreshedDashboard = await getDashboardScreenData();
+          setLiveDashboardData(previousDashboard => {
+            emitRealtimeNotifications(previousDashboard, refreshedDashboard);
+            return refreshedDashboard;
+          });
+        })(),
+      ]);
+
+      const noticeTone =
+        result.state === 'verification-success'
+          ? 'success'
+          : result.state === 'replay-rejected'
+            ? 'warning'
+            : 'danger';
+      const noticeTitle =
+        result.state === 'verification-success'
+          ? 'Receipt verified'
+          : result.state === 'replay-rejected'
+            ? 'Replay blocked'
+            : result.state === 'challenge-expired'
+              ? 'Challenge expired'
+              : 'Signature mismatch';
+      const noticeMessage =
+        result.state === 'verification-success'
+          ? `Receipt ${result.receiptId ?? 'created'} countersigned and persisted.`
+          : `${result.rejectionCode ?? 'POD_REJECTED'} · ${result.rejectionReason ?? 'Validation failed.'}`;
+
+      setAuthNotice({
+        tone: noticeTone,
+        title: noticeTitle,
+        message: noticeMessage,
+      });
+      pushLiveNotification({
+        tone: noticeTone,
+        title: options?.replay ? 'PoD replay check' : 'PoD verification',
+        message: noticeMessage,
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Unable to verify scanned proof.';
+
+      setAuthNotice({
+        tone: 'danger',
+        title: 'PoD verification failed',
+        message,
+      });
+      pushLiveNotification({
+        tone: 'danger',
+        title: 'PoD verification failed',
+        message,
+      });
+    } finally {
+      setVerifyingPodChallenge(false);
+      setReplayingPodChallenge(false);
     }
   }
 
@@ -401,9 +1701,28 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
     setSelectedTab('Command');
     setCommandSubview('main');
     setFieldOtpChallenge(null);
-    setScanDemoState('idle');
+    setPodChallengeEnvelope(null);
+    setPodVerificationOutcome(null);
+    setLatestPodReceipt(null);
+    setIssuingPodChallenge(false);
+    setVerifyingPodChallenge(false);
+    setReplayingPodChallenge(false);
     setExpandedConflictId(null);
     setAuditTerminalLines([]);
+    setLiveNotifications([]);
+    setLastSyncCycle(null);
+    setMeshRoleCycle(null);
+    setMeshStoreForwardCycle(null);
+    setMeshRelaySnapshot(null);
+    setMeshThrottleSimulation(null);
+    setDroneRequiredZones([]);
+    setHandoffPlan(null);
+    setHandoffTransfer(null);
+    setLatestHandoffEvent(null);
+    setRoutingOverview(null);
+    setLastRoutingRecompute(null);
+    setUpdatingEdgeId(null);
+    setRecomputingActiveRoute(false);
     setKeySnapshot({
       keyProvisioned: loginData.keyProvisioned,
       keyAlgorithm: loginData.keyAlgorithm,
@@ -497,6 +1816,7 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
             </View>
 
             {authNotice ? renderNoticeCard() : null}
+            {renderLiveNotifications()}
 
             {selectedTab === 'Command' ? renderCommandTab() : null}
             {selectedTab === 'Inventory' ? renderInventoryTab() : null}
@@ -554,6 +1874,11 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
       title: error.title,
       message: error.message,
     });
+    pushLiveNotification({
+      tone: error.code === 'ACCESS_DENIED' ? 'warning' : 'danger',
+      title: error.title,
+      message: error.message,
+    });
   }
 
   function notifyOtpCode(challenge: AuthOtpChallenge) {
@@ -605,7 +1930,7 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
               Role
             </Text>
             <Text className="text-[12px] text-[#9EB0D0]">
-              {formatConnectivityLabel(dashboardData.connectivityState)}
+              {formatConnectivityLabel(dashboard.connectivityState)}
             </Text>
           </View>
           <View className="mt-3 flex-row flex-wrap gap-2">
@@ -695,6 +2020,7 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
         </View>
 
         {authNotice ? renderNoticeCard() : null}
+        {renderLiveNotifications()}
       </View>
     );
   }
@@ -715,7 +2041,10 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
     return (
       <View className="gap-4">
         <Text className="text-[12px] text-[#6B7A92]">
-          Modes: road · water · air · cached map tiles
+          Modes: road · water · air · cached map tiles · recompute{' '}
+          {lastRoutingRecompute
+            ? `${lastRoutingRecompute.recomputeDurationMs}ms`
+            : 'idle'}
         </Text>
 
         <View className="overflow-hidden rounded-2xl bg-[#8B4513] px-4 py-4">
@@ -730,7 +2059,7 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
           </Text>
         </View>
 
-        {dashboardData.triageAlerts.slice(1).map(alert => (
+        {dashboard.triageAlerts.slice(1).map(alert => (
           <View
             key={`triage-${alert.deliveryId}-${alert.decidedAtMs}`}
             className="rounded-xl border border-[#5C3D28] bg-[#2A1E16] px-4 py-3"
@@ -759,15 +2088,129 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
             <View className="absolute left-24 top-14 h-[2px] w-[130px] rotate-[-32deg] bg-[#435270]" />
             <View className="absolute right-3 top-3 rounded bg-[#202C42] px-2 py-1">
               <Text className="text-[10px] font-medium text-[#CFD8EB]">
-                {routeSummary?.routeId ?? '—'}
+                {activeRouteOverview?.routeId ?? routeSummary?.routeId ?? '—'}
               </Text>
             </View>
             <View className="absolute bottom-3 left-3 rounded bg-[#1A2740] px-2 py-1">
               <Text className="text-[11px] text-[#DCE4F5]">
-                ETA {routeSummary?.etaMinutes ?? '—'} min
+                ETA{' '}
+                {activeRouteOverview?.totalEtaMinutes ?? routeSummary?.etaMinutes ?? '—'}{' '}
+                min
               </Text>
             </View>
           </View>
+        </View>
+
+        <View className="rounded-xl border border-[#253A5A] bg-[#17263C] p-4">
+          <View className="flex-row items-center justify-between gap-3">
+            <Text className="text-[11px] font-semibold uppercase tracking-wider text-[#8FA7CB]">
+              Routing controls
+            </Text>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Recompute active route"
+              disabled={recomputingActiveRoute || !routeSummary?.routeId}
+              onPress={handleRecomputeActiveRoute}
+              className={`rounded-md bg-[#BFD0F7] px-3 py-2 ${
+                recomputingActiveRoute || !routeSummary?.routeId
+                  ? 'opacity-50'
+                  : ''
+              }`}
+            >
+              <Text className="text-[11px] font-semibold text-[#102950]">
+                {recomputingActiveRoute ? 'Recomputing…' : 'Recompute route'}
+              </Text>
+            </Pressable>
+          </View>
+
+          {routingEdges.length === 0 ? (
+            <Text className="mt-3 text-[12px] text-[#94A9C9]">
+              No routing edges loaded.
+            </Text>
+          ) : (
+            <View className="mt-3 gap-2">
+              {routingEdges.map(edge => (
+                <View
+                  key={edge.edgeId}
+                  className="rounded-lg border border-[#2E4569] bg-[#0F1B2C] p-3"
+                >
+                  <Text className="text-[12px] font-semibold text-[#E4ECFA]">
+                    {edge.edgeId} · {formatEdgeTypeLabel(edge.edgeType)}
+                  </Text>
+                  <Text className="mt-1 text-[12px] text-[#A8B9D3]">
+                    {(edge.sourceLabel ?? edge.sourceNodeId) + ' -> ' +
+                      (edge.targetLabel ?? edge.targetNodeId)}
+                  </Text>
+                  <Text className="mt-1 text-[11px] text-[#8FA2C2]">
+                    {formatStatusLabel(edge.status)} · {edge.travelTimeMinutes}m ·
+                    risk {formatRisk(edge.riskScore)}
+                  </Text>
+
+                  <View className="mt-2 flex-row flex-wrap gap-2">
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={`Set ${edge.edgeId} open`}
+                      disabled={updatingEdgeId === edge.edgeId}
+                      onPress={() =>
+                        handleUpdateRouteEdgeStatus({ edge, status: 'open' })
+                      }
+                      className={`rounded-md bg-[#28445F] px-2.5 py-1.5 ${
+                        updatingEdgeId === edge.edgeId ? 'opacity-50' : ''
+                      }`}
+                    >
+                      <Text className="text-[11px] text-[#D9EEFF]">Open</Text>
+                    </Pressable>
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={`Set ${edge.edgeId} degraded`}
+                      disabled={updatingEdgeId === edge.edgeId}
+                      onPress={() =>
+                        handleUpdateRouteEdgeStatus({
+                          edge,
+                          status: 'degraded',
+                        })
+                      }
+                      className={`rounded-md bg-[#4A5A2B] px-2.5 py-1.5 ${
+                        updatingEdgeId === edge.edgeId ? 'opacity-50' : ''
+                      }`}
+                    >
+                      <Text className="text-[11px] text-[#E3F3D4]">Degraded</Text>
+                    </Pressable>
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={`Set ${edge.edgeId} washed out`}
+                      disabled={updatingEdgeId === edge.edgeId}
+                      onPress={() =>
+                        handleUpdateRouteEdgeStatus({
+                          edge,
+                          status: 'washed_out',
+                        })
+                      }
+                      className={`rounded-md bg-[#613232] px-2.5 py-1.5 ${
+                        updatingEdgeId === edge.edgeId ? 'opacity-50' : ''
+                      }`}
+                    >
+                      <Text className="text-[11px] text-[#FFD8D8]">Washed out</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              ))}
+            </View>
+          )}
+
+          {lastRoutingRecompute ? (
+            <View className="mt-3 rounded-lg border border-[#2E4569] bg-[#0F1B2C] px-3 py-2">
+              <Text className="text-[11px] text-[#D3E1F8]">
+                Last run: {lastRoutingRecompute.recomputeDurationMs}ms ·
+                {lastRoutingRecompute.withinTwoSeconds
+                  ? ' within 2s target'
+                  : ' above 2s target'}
+              </Text>
+              <Text className="mt-1 text-[11px] text-[#9FB3D2]">
+                Affected routes: {lastRoutingRecompute.affectedRoutes.length}
+              </Text>
+            </View>
+          ) : null}
         </View>
 
         <View className="rounded-xl border border-[#2A2038] bg-[#1A1525] px-4 py-3">
@@ -783,7 +2226,7 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
           <Text className="text-[11px] font-semibold uppercase tracking-wider text-[#7A8BAD]">
             Vehicles
           </Text>
-          {dashboardData.nodeHealth.map(node => (
+          {dashboard.nodeHealth.map(node => (
             <View
               key={node.vehicleId}
               className="flex-row items-center justify-between rounded-xl border border-[#20314D] bg-[#202C41] px-3 py-3"
@@ -829,13 +2272,31 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
             Active route
           </Text>
           <Text className="mt-2 text-[16px] font-semibold text-[#EEF3FC]">
-            {routeSummary?.routeId ?? 'None'}
+            {activeRouteOverview?.routeId ?? routeSummary?.routeId ?? 'None'}
           </Text>
           <Text className="mt-2 text-[14px] leading-5 text-[#B8C4DA]">
-            {routeSummary
-              ? `${routeSummary.deliveryId} · ETA ${routeSummary.etaMinutes ?? '—'} min · risk ${formatRisk(routeSummary.totalRiskScore)}`
+            {activeRouteOverview
+              ? `${activeRouteOverview.deliveryId} · ETA ${activeRouteOverview.totalEtaMinutes} min · risk ${formatRisk(activeRouteOverview.totalRiskScore)}`
+              : routeSummary
+                ? `${routeSummary.deliveryId} · ETA ${routeSummary.etaMinutes ?? '—'} min · risk ${formatRisk(routeSummary.totalRiskScore)}`
               : 'No route in current dataset.'}
           </Text>
+          {activeRouteOverview?.legs.length ? (
+            <View className="mt-3 gap-1">
+              {activeRouteOverview.legs.slice(0, 3).map(leg => (
+                <Text
+                  key={`${activeRouteOverview.routeId}-${leg.edgeId}-${leg.fromNodeId}`}
+                  className="text-[12px] text-[#9FB0C9]"
+                >
+                  {leg.fromNodeId}
+                  {' -> '}
+                  {leg.toNodeId} · {formatEdgeTypeLabel(leg.edgeType)} ·
+                  {' '}
+                  {leg.etaMinutes}m
+                </Text>
+              ))}
+            </View>
+          ) : null}
         </View>
 
         <View className="rounded-xl border border-[#213350] bg-[#212C40] p-4">
@@ -850,9 +2311,22 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
               Handoff {routeSummary?.requiresHandoff ? 'required' : 'not required'}
             </Text>
             <Text className="text-[14px] text-[#E8EEF9]">
+              Drone zone{' '}
+              {activeDroneRequiredZone?.droneRequired
+                ? 'required'
+                : activeDroneRequiredZone
+                  ? 'not required'
+                  : 'unknown'}
+            </Text>
+            <Text className="text-[14px] text-[#E8EEF9]">
               Priority {routeSummary?.priorityTier ?? '—'}
             </Text>
           </View>
+          {activeDroneRequiredZone ? (
+            <Text className="mt-3 text-[12px] leading-5 text-[#9EB0D0]">
+              {activeDroneRequiredZone.reason}
+            </Text>
+          ) : null}
         </View>
 
         {routeSummary?.requiresHandoff &&
@@ -873,7 +2347,7 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
   function renderInventoryTab() {
     return (
       <View className="gap-3">
-        {dashboardData.supplies.map(supply => {
+        {dashboard.supplies.map(supply => {
           const { localQty, peerQty } = splitLocalPeerQuantities(
             supply.quantity,
             supply.inventoryItemId,
@@ -928,12 +2402,12 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
           <Text className="text-[11px] font-semibold uppercase tracking-wider text-[#7A8BAD]">
             Conflicts
           </Text>
-          {dashboardData.conflicts.length === 0 ? (
+          {dashboard.conflicts.length === 0 ? (
             <View className="rounded-xl border border-[#20314D] bg-[#182438] px-4 py-3">
               <Text className="text-[13px] text-[#8FA0BC]">None</Text>
             </View>
           ) : (
-            dashboardData.conflicts.map(conflict => {
+            dashboard.conflicts.map(conflict => {
               const expanded = expandedConflictId === conflict.conflictId;
 
               return (
@@ -968,7 +2442,7 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
                             Local
                           </Text>
                           <Text className="mt-1 font-mono text-[11px] text-[#DCE4F5]">
-                            {conflict.fieldName} pending
+                            {conflict.localValueText ?? 'No local snapshot'}
                           </Text>
                         </View>
                         <View className="flex-1 rounded-lg bg-[#0A1220] p-3">
@@ -976,7 +2450,7 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
                             Peer
                           </Text>
                           <Text className="mt-1 font-mono text-[11px] text-[#DCE4F5]">
-                            {conflict.fieldName} pending
+                            {conflict.remoteValueText ?? 'No peer snapshot'}
                           </Text>
                         </View>
                       </View>
@@ -990,7 +2464,61 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
                         <Text className="text-[11px] text-[#7BC9A8]">
                           Resolved {conflict.resolvedAtMs}
                         </Text>
-                      ) : null}
+                      ) : (
+                        <View className="mt-1 flex-row flex-wrap gap-2">
+                          <Pressable
+                            accessibilityRole="button"
+                            accessibilityLabel={`Resolve ${conflict.conflictId} with local value`}
+                            disabled={resolvingConflictId === conflict.conflictId}
+                            onPress={() =>
+                              handleResolveConflict(conflict.conflictId, 'local')
+                            }
+                            className={`rounded-md bg-[#2A3D5D] px-3 py-2 ${
+                              resolvingConflictId === conflict.conflictId
+                                ? 'opacity-60'
+                                : ''
+                            }`}
+                          >
+                            <Text className="text-[11px] font-medium text-[#DFE8FA]">
+                              Keep local
+                            </Text>
+                          </Pressable>
+                          <Pressable
+                            accessibilityRole="button"
+                            accessibilityLabel={`Resolve ${conflict.conflictId} with peer value`}
+                            disabled={resolvingConflictId === conflict.conflictId}
+                            onPress={() =>
+                              handleResolveConflict(conflict.conflictId, 'remote')
+                            }
+                            className={`rounded-md bg-[#244760] px-3 py-2 ${
+                              resolvingConflictId === conflict.conflictId
+                                ? 'opacity-60'
+                                : ''
+                            }`}
+                          >
+                            <Text className="text-[11px] font-medium text-[#D8F2FF]">
+                              Apply peer
+                            </Text>
+                          </Pressable>
+                          <Pressable
+                            accessibilityRole="button"
+                            accessibilityLabel={`Resolve ${conflict.conflictId} by merge`}
+                            disabled={resolvingConflictId === conflict.conflictId}
+                            onPress={() =>
+                              handleResolveConflict(conflict.conflictId, 'merged')
+                            }
+                            className={`rounded-md bg-[#3A4D2A] px-3 py-2 ${
+                              resolvingConflictId === conflict.conflictId
+                                ? 'opacity-60'
+                                : ''
+                            }`}
+                          >
+                            <Text className="text-[11px] font-medium text-[#E0F2D8]">
+                              Merge
+                            </Text>
+                          </Pressable>
+                        </View>
+                      )}
                     </View>
                   ) : null}
                 </View>
@@ -1003,11 +2531,23 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
   }
 
   function renderScannerTab() {
+    const challengeExpirySeconds = podChallengeEnvelope
+      ? Math.max(
+          0,
+          Math.ceil((podChallengeEnvelope.expiresAtMs - Date.now()) / 1000),
+        )
+      : 0;
+
     return (
       <View className="gap-3">
         <Text className="text-[11px] font-semibold uppercase tracking-wider text-[#7A8BAD]">
           Proof of delivery
         </Text>
+        <Text className="text-[12px] text-[#8FA0BC]">
+          Delivery {scannerDeliveryId ?? '—'} · signed challenge-response ·
+          nonce replay lock.
+        </Text>
+
         <View className="relative min-h-[280px] overflow-hidden rounded-xl border border-[#3A4D6C] bg-[#05080e]">
           <View className="absolute inset-0 bg-[#0a1628] opacity-90" />
           <View className="absolute left-3 top-3 h-6 w-6 border-l-2 border-t-2 border-[#6B7A92]" />
@@ -1015,48 +2555,121 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
           <View className="absolute bottom-3 left-3 h-6 w-6 border-b-2 border-l-2 border-[#6B7A92]" />
           <View className="absolute bottom-3 right-3 h-6 w-6 border-b-2 border-r-2 border-[#6B7A92]" />
           <View className="flex-1 items-center justify-center px-6 py-12">
-            <Text className="text-center text-[13px] text-[#6B7A92]">
-              Camera not wired · placeholder
-            </Text>
+            {podChallengeEnvelope ? (
+              <View className="gap-2">
+                <Text className="text-center text-[12px] font-semibold text-[#BFD0F7]">
+                  Challenge {podChallengeEnvelope.challengeId}
+                </Text>
+                <Text className="text-center text-[11px] text-[#93A5C3]">
+                  Expires in {challengeExpirySeconds}s
+                </Text>
+                <Text className="text-center text-[11px] leading-5 text-[#6B7A92]">
+                  {podChallengeEnvelope.qrPayload.slice(0, 64)}...
+                </Text>
+              </View>
+            ) : (
+              <Text className="text-center text-[13px] text-[#6B7A92]">
+                Generate challenge to simulate QR scanner handshake.
+              </Text>
+            )}
           </View>
         </View>
 
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Simulate scan"
-          onPress={() =>
-            setScanDemoState(previous =>
-              previous === 'idle'
-                ? 'success'
-                : previous === 'success'
-                  ? 'tamper'
-                  : 'idle',
-            )
-          }
-          className="min-h-[48px] items-center justify-center rounded-lg bg-[#BFD0F7] px-4"
-        >
-          <Text className="text-[14px] font-semibold text-[#102950]">
-            Simulate scan
-          </Text>
-        </Pressable>
+        <View className="gap-2">
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Generate signed challenge"
+            disabled={issuingPodChallenge || !scannerDeliveryId}
+            onPress={handleGeneratePodChallenge}
+            className={`min-h-[48px] items-center justify-center rounded-lg bg-[#BFD0F7] px-4 ${
+              issuingPodChallenge || !scannerDeliveryId ? 'opacity-60' : ''
+            }`}
+          >
+            <Text className="text-[14px] font-semibold text-[#102950]">
+              {issuingPodChallenge ? 'Signing challenge…' : 'Generate challenge'}
+            </Text>
+          </Pressable>
 
-        {scanDemoState === 'idle' ? (
-          <Text className="text-[12px] text-[#6B7A92]">Idle</Text>
-        ) : null}
-        {scanDemoState === 'success' ? (
-          <View className="rounded-xl border border-[#37635B] bg-[#17332E] p-3">
-            <Text className="text-[13px] font-medium text-[#9FD4C4]">Verified</Text>
-            <Text className="mt-1 text-[13px] text-[#C4D4E8]">
-              Signature OK · receipt recorded (demo)
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Verify scanned challenge"
+            disabled={!podChallengeEnvelope || verifyingPodChallenge}
+            onPress={() => {
+              void handleVerifyPodChallenge();
+            }}
+            className={`min-h-[48px] items-center justify-center rounded-lg bg-[#8FD1B5] px-4 ${
+              !podChallengeEnvelope || verifyingPodChallenge ? 'opacity-60' : ''
+            }`}
+          >
+            <Text className="text-[14px] font-semibold text-[#103825]">
+              {verifyingPodChallenge ? 'Verifying signature…' : 'Verify and countersign'}
+            </Text>
+          </Pressable>
+
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Replay scanned challenge"
+            disabled={!podChallengeEnvelope || replayingPodChallenge}
+            onPress={() => {
+              void handleVerifyPodChallenge({ replay: true });
+            }}
+            className={`min-h-[48px] items-center justify-center rounded-lg bg-[#E6A786] px-4 ${
+              !podChallengeEnvelope || replayingPodChallenge ? 'opacity-60' : ''
+            }`}
+          >
+            <Text className="text-[14px] font-semibold text-[#3F2416]">
+              {replayingPodChallenge ? 'Checking replay guard…' : 'Replay same challenge'}
+            </Text>
+          </Pressable>
+        </View>
+
+        {podVerificationOutcome ? (
+          <View
+            className={`rounded-xl border p-3 ${
+              podVerificationOutcome.state === 'verification-success'
+                ? 'border-[#37635B] bg-[#17332E]'
+                : podVerificationOutcome.state === 'replay-rejected'
+                  ? 'border-[#6B5A2F] bg-[#3A301B]'
+                  : 'border-[#6A403D] bg-[#3A2221]'
+            }`}
+          >
+            <Text className="text-[13px] font-medium text-[#F0F4FD]">
+              {formatPodVerificationStateLabel(podVerificationOutcome.state)}
+            </Text>
+            <Text className="mt-1 text-[13px] text-[#D5DFEF]">
+              {podVerificationOutcome.rejectionCode
+                ? `${podVerificationOutcome.rejectionCode} · ${podVerificationOutcome.rejectionReason ?? 'Rejected'}`
+                : `Receipt ${podVerificationOutcome.receiptId ?? '—'} verified at ${formatZuluTimestamp(podVerificationOutcome.verifiedAtMs)}`}
             </Text>
           </View>
-        ) : null}
-        {scanDemoState === 'tamper' ? (
-          <View className="rounded-xl border border-[#6A403D] bg-[#3A2221] p-3">
-            <Text className="text-[13px] font-medium text-[#F0B39A]">Rejected</Text>
-            <Text className="mt-1 text-[13px] text-[#E7ECF8]">
-              Hash mismatch · audit event (demo)
+        ) : (
+          <Text className="text-[12px] text-[#6B7A92]">
+            Waiting for challenge issuance.
+          </Text>
+        )}
+
+        {latestPodReceipt ? (
+          <View className="rounded-xl border border-[#2A3F5E] bg-[#131E31] p-3">
+            <Text className="text-[11px] font-semibold uppercase tracking-wider text-[#8FA7CB]">
+              Latest receipt
             </Text>
+            <Text className="mt-2 text-[13px] text-[#E4EBFA]">
+              {latestPodReceipt.receiptId} · {latestPodReceipt.status}
+            </Text>
+            <Text className="mt-1 text-[12px] text-[#9EB0D0]">
+              Sender {latestPodReceipt.senderDeviceId} · Recipient{' '}
+              {latestPodReceipt.recipientDeviceId ?? 'pending'}
+            </Text>
+            <Text className="mt-1 text-[11px] text-[#7F91AE]">
+              Issued {formatZuluTimestamp(latestPodReceipt.issuedAtMs)} · Expires{' '}
+              {formatZuluTimestamp(latestPodReceipt.expiresAtMs)}
+            </Text>
+            {latestPodReceipt.rejectionCode ? (
+              <Text className="mt-1 text-[11px] text-[#E6B5A8]">
+                {latestPodReceipt.rejectionCode} ·{' '}
+                {latestPodReceipt.rejectionReason ?? 'Rejected'}
+              </Text>
+            ) : null}
           </View>
         ) : null}
       </View>
@@ -1064,8 +2677,11 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
   }
 
   function renderMeshTab() {
-    const meshRole =
-      dashboardData.sync.peerCount > 0 ? 'Relay-capable' : 'Client';
+    const meshRoleLabel = meshRoleCycle
+      ? meshRoleCycle.role.toUpperCase()
+      : dashboard.sync.peerCount > 0
+        ? 'RELAY-CAPABLE'
+        : 'CLIENT';
 
     return (
       <View className="gap-3">
@@ -1074,8 +2690,28 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
             This node
           </Text>
           <Text className="mt-2 text-[18px] font-semibold text-[#EEF3FC]">
-            {meshRole}
+            {meshRoleLabel}
           </Text>
+          {meshRoleCycle ? (
+            <View className="mt-3 gap-1">
+              <MeshRow
+                label="Relay score"
+                value={meshRoleCycle.relayScore.toFixed(1)}
+              />
+              <MeshRow
+                label="Battery"
+                value={`${meshRoleCycle.batteryPercent}%`}
+              />
+              <MeshRow
+                label="Signal"
+                value={`${meshRoleCycle.signalStrength}%`}
+              />
+              <MeshRow
+                label="Nearby peers"
+                value={String(meshRoleCycle.nearbyPeerCount)}
+              />
+            </View>
+          ) : null}
         </View>
 
         <View className="rounded-xl border border-[#213350] bg-[#212C40] p-4">
@@ -1085,16 +2721,16 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
           <View className="mt-3 gap-2">
             <MeshRow
               label="Link"
-              value={formatConnectivityLabel(dashboardData.connectivityState)}
+              value={formatConnectivityLabel(dashboard.connectivityState)}
             />
-            <MeshRow label="Peers" value={String(dashboardData.sync.peerCount)} />
+            <MeshRow label="Peers" value={String(dashboard.sync.peerCount)} />
             <MeshRow
               label="Queued"
-              value={String(dashboardData.sync.queuedEnvelopeCount)}
+              value={String(dashboard.sync.queuedEnvelopeCount)}
             />
             <MeshRow
               label="In flight"
-              value={String(dashboardData.sync.inFlightEnvelopeCount)}
+              value={String(dashboard.sync.inFlightEnvelopeCount)}
             />
           </View>
         </View>
@@ -1110,10 +2746,285 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
           />
         </View>
 
+        <View className="flex-row items-center justify-between rounded-xl border border-[#2F415E] bg-[#182438] px-4 py-3">
+          <Text className="flex-1 text-[14px] text-[#D0D9EC]">
+            Stationary mode
+          </Text>
+          <Switch
+            accessibilityLabel="Stationary accelerometer state"
+            value={meshStationaryMode}
+            onValueChange={setMeshStationaryMode}
+          />
+        </View>
+
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Run battery-aware throttle simulation"
+          disabled={simulatingMeshThrottle || !activeSession}
+          onPress={handleSimulateMeshThrottle}
+          className={`min-h-[44px] items-center justify-center rounded-lg bg-[#2D5B4A] px-4 ${
+            simulatingMeshThrottle || !activeSession ? 'opacity-60' : ''
+          }`}
+        >
+          <Text className="text-[13px] font-medium text-[#DFF7EB]">
+            {simulatingMeshThrottle
+              ? 'Simulating 10-min run...'
+              : 'Run 10-min battery simulation'}
+          </Text>
+        </Pressable>
+
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Evaluate mesh role"
+          disabled={evaluatingMeshRole || !activeSession}
+          onPress={handleEvaluateMeshRole}
+          className={`min-h-[44px] items-center justify-center rounded-lg bg-[#445B2B] px-4 ${
+            evaluatingMeshRole || !activeSession ? 'opacity-60' : ''
+          }`}
+        >
+          <Text className="text-[13px] font-medium text-[#E6F2D8]">
+            {evaluatingMeshRole ? 'Evaluating role…' : 'Evaluate role heuristic'}
+          </Text>
+        </Pressable>
+
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Run delta sync cycle"
+          disabled={syncingMesh || !activeSession}
+          onPress={handleRunMeshSync}
+          className={`min-h-[48px] items-center justify-center rounded-lg bg-[#BFD0F7] px-4 ${
+            syncingMesh || !activeSession ? 'opacity-60' : ''
+          }`}
+        >
+          <Text className="text-[14px] font-semibold text-[#102950]">
+            {syncingMesh ? 'Syncing…' : 'Run delta sync'}
+          </Text>
+        </Pressable>
+
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Run encrypted store-forward all online"
+          disabled={runningStoreForward || !activeSession}
+          onPress={() =>
+            handleRunStoreForward({ relayOnline: true, recipientOnline: true })
+          }
+          className={`min-h-[44px] items-center justify-center rounded-lg bg-[#37635B] px-4 ${
+            runningStoreForward || !activeSession ? 'opacity-60' : ''
+          }`}
+        >
+          <Text className="text-[13px] font-medium text-[#DDF4ED]">
+            {runningStoreForward ? 'Running…' : 'Run encrypted A->B->C'}
+          </Text>
+        </Pressable>
+
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Run encrypted store-forward with relay offline"
+          disabled={runningStoreForward || !activeSession}
+          onPress={() =>
+            handleRunStoreForward({ relayOnline: false, recipientOnline: true })
+          }
+          className={`min-h-[44px] items-center justify-center rounded-lg bg-[#5F4A1F] px-4 ${
+            runningStoreForward || !activeSession ? 'opacity-60' : ''
+          }`}
+        >
+          <Text className="text-[13px] font-medium text-[#FFE6B8]">
+            Queue while relay offline
+          </Text>
+        </Pressable>
+
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Resume relay forwarding"
+          disabled={resumingRelay || !activeSession}
+          onPress={handleResumeRelayForwarding}
+          className={`min-h-[44px] items-center justify-center rounded-lg bg-[#3C365A] px-4 ${
+            resumingRelay || !activeSession ? 'opacity-60' : ''
+          }`}
+        >
+          <Text className="text-[13px] font-medium text-[#E0DBFF]">
+            {resumingRelay ? 'Resuming…' : 'Resume relay forwarding'}
+          </Text>
+        </Pressable>
+
+        {lastSyncCycle ? (
+          <View className="rounded-xl border border-[#213350] bg-[#212C40] p-4">
+            <Text className="text-[11px] font-semibold uppercase tracking-wider text-[#7A8BAD]">
+              Last cycle
+            </Text>
+            <View className="mt-2 gap-1">
+              <MeshRow label="Peer" value={lastSyncCycle.peerDeviceId} />
+              <MeshRow label="Transport" value={lastSyncCycle.transport} />
+              <MeshRow
+                label="Transport sent"
+                value={lastSyncCycle.transportSent ? 'yes' : 'no'}
+              />
+              <MeshRow
+                label="Exported"
+                value={String(lastSyncCycle.exportedEventCount)}
+              />
+              <MeshRow
+                label="Imported"
+                value={String(lastSyncCycle.importedEventCount)}
+              />
+              <MeshRow
+                label="Conflicts"
+                value={String(lastSyncCycle.conflictsDetected)}
+              />
+              <MeshRow
+                label="Envelope"
+                value={`${lastSyncCycle.envelopeSizeBytes} B`}
+              />
+            </View>
+          </View>
+        ) : null}
+
+        {meshStoreForwardCycle ? (
+          <View className="rounded-xl border border-[#3A4B66] bg-[#18263B] p-4">
+            <Text className="text-[11px] font-semibold uppercase tracking-wider text-[#9AB1D6]">
+              Last store-forward cycle
+            </Text>
+            <View className="mt-2 gap-1">
+              <MeshRow label="Packet" value={meshStoreForwardCycle.packetId} />
+              <MeshRow
+                label="Sender"
+                value={meshStoreForwardCycle.senderDeviceId}
+              />
+              <MeshRow
+                label="Relay"
+                value={meshStoreForwardCycle.relayDeviceId}
+              />
+              <MeshRow
+                label="Recipient"
+                value={meshStoreForwardCycle.recipientDeviceId}
+              />
+              <MeshRow
+                label="Sender dispatches"
+                value={String(meshStoreForwardCycle.senderDispatches)}
+              />
+              <MeshRow
+                label="Relay dispatches"
+                value={String(meshStoreForwardCycle.relayDispatches)}
+              />
+              <MeshRow
+                label="Delivered"
+                value={meshStoreForwardCycle.delivered ? 'yes' : 'no'}
+              />
+              <MeshRow
+                label="Relay stored"
+                value={meshStoreForwardCycle.relayStored ? 'yes' : 'no'}
+              />
+            </View>
+          </View>
+        ) : null}
+
+        {meshThrottleSimulation ? (
+          <View className="rounded-xl border border-[#2A4A44] bg-[#102822] p-4">
+            <Text className="text-[11px] font-semibold uppercase tracking-wider text-[#8CCCB7]">
+              Battery-aware throttle result
+            </Text>
+            <View className="mt-2 gap-1">
+              <MeshRow
+                label="Duration"
+                value={`${meshThrottleSimulation.durationMinutes} min`}
+              />
+              <MeshRow
+                label="Baseline broadcasts"
+                value={String(meshThrottleSimulation.baseline.broadcastCount)}
+              />
+              <MeshRow
+                label="Throttled broadcasts"
+                value={String(meshThrottleSimulation.throttled.broadcastCount)}
+              />
+              <MeshRow
+                label="Saved battery"
+                value={`${meshThrottleSimulation.batterySavedPercent.toFixed(2)}%`}
+              />
+              <MeshRow
+                label="Nearest node"
+                value={meshThrottleSimulation.context.nearestNodeId ?? 'unknown'}
+              />
+              <MeshRow
+                label="Distance"
+                value={`${meshThrottleSimulation.context.knownNodeDistanceMeters} m`}
+              />
+            </View>
+            <Text className="mt-2 text-[11px] text-[#BFE7D8]">
+              Factors: battery{' '}
+              {meshThrottleSimulation.reductionApplied.batteryLow ? 'low' : 'normal'}
+              {' · '}stationary{' '}
+              {meshThrottleSimulation.reductionApplied.stationary ? 'yes' : 'no'}
+              {' · '}near node{' '}
+              {meshThrottleSimulation.reductionApplied.nearKnownNode
+                ? 'yes'
+                : 'no'}
+            </Text>
+          </View>
+        ) : null}
+
+        {meshRelaySnapshot ? (
+          <View className="rounded-xl border border-[#213350] bg-[#212C40] p-4">
+            <Text className="text-[11px] font-semibold uppercase tracking-wider text-[#7A8BAD]">
+              Relay queue snapshot
+            </Text>
+            <View className="mt-2 gap-1">
+              <MeshRow
+                label="Sender pending"
+                value={String(meshRelaySnapshot.queue.senderPending)}
+              />
+              <MeshRow
+                label="Relay pending"
+                value={String(meshRelaySnapshot.queue.relayPending)}
+              />
+              <MeshRow
+                label="Recipient pending"
+                value={String(meshRelaySnapshot.queue.recipientPending)}
+              />
+            </View>
+          </View>
+        ) : null}
+
+        {meshRelaySnapshot ? (
+          <View className="gap-2 rounded-xl border border-[#20314D] bg-[#182438] p-4">
+            <Text className="text-[11px] font-semibold uppercase tracking-wider text-[#7A8BAD]">
+              Relay logs
+            </Text>
+            <Text className="text-[12px] text-[#8FA0BC]">Sender</Text>
+            {meshRelaySnapshot.logs.sender.slice(0, 4).map(log => (
+              <Text
+                key={`sender-${log.packetId}-${log.occurredAtMs}-${log.action}`}
+                className="text-[11px] text-[#CBD6EB]"
+              >
+                {`${formatZuluTimestamp(log.occurredAtMs)} · ${log.action} · ${log.status}${log.detail ? ` · ${log.detail}` : ''}`}
+              </Text>
+            ))}
+
+            <Text className="mt-2 text-[12px] text-[#8FA0BC]">Relay</Text>
+            {meshRelaySnapshot.logs.relay.slice(0, 4).map(log => (
+              <Text
+                key={`relay-${log.packetId}-${log.occurredAtMs}-${log.action}`}
+                className="text-[11px] text-[#CBD6EB]"
+              >
+                {`${formatZuluTimestamp(log.occurredAtMs)} · ${log.action} · ${log.status}${log.detail ? ` · ${log.detail}` : ''}`}
+              </Text>
+            ))}
+
+            <Text className="mt-2 text-[12px] text-[#8FA0BC]">Recipient</Text>
+            {meshRelaySnapshot.logs.recipient.slice(0, 4).map(log => (
+              <Text
+                key={`recipient-${log.packetId}-${log.occurredAtMs}-${log.action}`}
+                className="text-[11px] text-[#CBD6EB]"
+              >
+                {`${formatZuluTimestamp(log.occurredAtMs)} · ${log.action} · ${log.status}${log.detail ? ` · ${log.detail}` : ''}`}
+              </Text>
+            ))}
+          </View>
+        ) : null}
+
         <Text className="text-[11px] font-semibold uppercase tracking-wider text-[#7A8BAD]">
           Peers
         </Text>
-        {dashboardData.nodeHealth.map(node => (
+        {dashboard.nodeHealth.map(node => (
           <View
             key={node.vehicleId}
             className="rounded-xl border border-[#213350] bg-[#212C40] p-4"
@@ -1206,6 +3117,16 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
   }
 
   function renderHandoffView() {
+    const handoffState = handoffTransfer
+      ? 'ownership-transferred'
+      : latestHandoffEvent?.status === 'ownership_transferred'
+        ? 'ownership-transferred'
+        : latestHandoffEvent?.status === 'confirmed'
+          ? 'handoff-confirmed'
+          : routeSummary?.requiresHandoff || activeDroneRequiredZone?.droneRequired
+            ? 'drone-required'
+            : 'rendezvous-pending';
+
     return (
       <View className="gap-3">
         <View className="rounded-xl border border-[#213350] bg-[#212C40] p-4">
@@ -1213,22 +3134,167 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
             Handoff
           </Text>
           <Text className="mt-2 text-[16px] font-semibold text-[#EFF3FC]">
-            {routeSummary?.requiresHandoff ? 'Required' : 'Not required'}
+            {routeSummary?.requiresHandoff || activeDroneRequiredZone?.droneRequired
+              ? 'Required'
+              : 'Not required'}
           </Text>
           <Text className="mt-2 text-[14px] leading-5 text-[#BEC9DE]">
-            {routeSummary?.requiresHandoff
-              ? `Waypoint ${triageAlerts[0]?.safeWaypointNodeId ?? '—'} · ${routeSummary.deliveryId}`
-              : '—'}
+            {scannerDeliveryId
+              ? `${scannerDeliveryId} · ${handoffState.replace(/-/g, ' ')}`
+              : 'No active delivery'}
           </Text>
+          {activeDroneRequiredZone ? (
+            <Text className="mt-2 text-[12px] leading-5 text-[#9EB0D0]">
+              {activeDroneRequiredZone.reason}
+            </Text>
+          ) : null}
         </View>
+
+        <View className="rounded-xl border border-[#2A3F5E] bg-[#131E31] p-4">
+          <Text className="text-[11px] font-semibold uppercase tracking-wider text-[#8FA7CB]">
+            Reachability analysis
+          </Text>
+          {activeDroneRequiredZone ? (
+            <View className="mt-2 gap-1">
+              <MeshRow
+                label="Truck"
+                value={activeDroneRequiredZone.reachableByTruck ? 'reachable' : 'blocked'}
+              />
+              <MeshRow
+                label="Speedboat"
+                value={
+                  activeDroneRequiredZone.reachableBySpeedboat ? 'reachable' : 'blocked'
+                }
+              />
+              <MeshRow
+                label="Drone"
+                value={activeDroneRequiredZone.reachableByDrone ? 'reachable' : 'blocked'}
+              />
+            </View>
+          ) : (
+            <Text className="mt-2 text-[12px] text-[#9EB0D0]">
+              Reachability pending.
+            </Text>
+          )}
+        </View>
+
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Compute rendezvous"
+          disabled={computingHandoffPlan || !scannerDeliveryId}
+          onPress={handleComputeRendezvousPlan}
+          className={`min-h-[46px] items-center justify-center rounded-lg bg-[#8FD1B5] px-4 ${
+            computingHandoffPlan || !scannerDeliveryId ? 'opacity-60' : ''
+          }`}
+        >
+          <Text className="text-[14px] font-semibold text-[#103825]">
+            {computingHandoffPlan ? 'Computing rendezvous...' : 'Compute rendezvous'}
+          </Text>
+        </Pressable>
+
+        {handoffPlan ? (
+          <View className="rounded-xl border border-[#2A3F5E] bg-[#131E31] p-4">
+            <Text className="text-[11px] font-semibold uppercase tracking-wider text-[#8FA7CB]">
+              Rendezvous plan
+            </Text>
+            {handoffPlan.feasible ? (
+              <View className="mt-2 gap-1">
+                <MeshRow label="Node" value={handoffPlan.rendezvousNodeId} />
+                <MeshRow
+                  label="Boat ETA"
+                  value={`${handoffPlan.boatEtaMinutes} min`}
+                />
+                <MeshRow
+                  label="Drone ETA (to node)"
+                  value={`${handoffPlan.droneEtaToRendezvousMinutes} min`}
+                />
+                <MeshRow
+                  label="Drone ETA (to destination)"
+                  value={`${handoffPlan.droneEtaToDestinationMinutes} min`}
+                />
+                <MeshRow
+                  label="Total ETA"
+                  value={`${handoffPlan.totalEtaMinutes} min`}
+                />
+              </View>
+            ) : (
+              <Text className="mt-2 text-[13px] text-[#E6B5A8]">
+                {handoffPlan.reason ?? 'No feasible rendezvous plan.'}
+              </Text>
+            )}
+          </View>
+        ) : null}
+
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Execute ownership transfer"
+          disabled={
+            executingHandoff ||
+            !scannerDeliveryId ||
+            (handoffPlan !== null && !handoffPlan.feasible)
+          }
+          onPress={handleExecuteHandoffTransfer}
+          className={`min-h-[46px] items-center justify-center rounded-lg bg-[#BFD0F7] px-4 ${
+            executingHandoff ||
+            !scannerDeliveryId ||
+            (handoffPlan !== null && !handoffPlan.feasible)
+              ? 'opacity-60'
+              : ''
+          }`}
+        >
+          <Text className="text-[14px] font-semibold text-[#102950]">
+            {executingHandoff
+              ? 'Executing PoD + transfer...'
+              : 'Execute ownership transfer'}
+          </Text>
+        </Pressable>
+
+        {latestHandoffEvent ? (
+          <View className="rounded-xl border border-[#2A3F5E] bg-[#131E31] p-4">
+            <Text className="text-[11px] font-semibold uppercase tracking-wider text-[#8FA7CB]">
+              Latest handoff event
+            </Text>
+            <View className="mt-2 gap-1">
+              <MeshRow label="Handoff" value={latestHandoffEvent.handoffId} />
+              <MeshRow
+                label="Status"
+                value={latestHandoffEvent.status.replace(/_/g, ' ')}
+              />
+              <MeshRow
+                label="Source"
+                value={latestHandoffEvent.sourceVehicleId}
+              />
+              <MeshRow
+                label="Target"
+                value={latestHandoffEvent.targetVehicleId}
+              />
+              <MeshRow
+                label="Receipt"
+                value={latestHandoffEvent.receiptId ?? 'pending'}
+              />
+            </View>
+          </View>
+        ) : null}
+
+        {handoffTransfer ? (
+          <View className="rounded-xl border border-[#2F5A4E] bg-[#153228] p-4">
+            <Text className="text-[11px] font-semibold uppercase tracking-wider text-[#9DE1C6]">
+              Transfer committed
+            </Text>
+            <Text className="mt-2 text-[13px] text-[#E7FFF5]">
+              Receipt {handoffTransfer.receiptId} · ledger event{' '}
+              {handoffTransfer.ownershipTransferEventId}
+            </Text>
+          </View>
+        ) : null}
 
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Back"
           onPress={() => setCommandSubview('main')}
-          className="min-h-[44px] items-center justify-center rounded-lg bg-[#BFD0F7] px-4"
+          className="min-h-[44px] items-center justify-center rounded-lg bg-[#233955] px-4"
         >
-          <Text className="text-[14px] font-semibold text-[#102950]">Back</Text>
+          <Text className="text-[14px] font-semibold text-[#CFE1FF]">Back</Text>
         </Pressable>
       </View>
     );
@@ -1242,7 +3308,7 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
         </Text>
         <View className="rounded-md border border-[#20314C] bg-[#111C2D] px-2 py-1">
           <Text className="text-[11px] font-medium text-[#C8D5EF]">
-            {formatConnectivityLabel(dashboardData.connectivityState)}
+            {formatConnectivityLabel(dashboard.connectivityState)}
           </Text>
         </View>
       </View>
@@ -1262,6 +3328,46 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
         <Text className="mt-1 text-[13px] leading-5 text-[#E7ECF8]">
           {authNotice?.message}
         </Text>
+      </View>
+    );
+  }
+
+  function renderLiveNotifications() {
+    return (
+      <View className="rounded-xl border border-[#20304A] bg-[#0D1627] p-3">
+        <View className="flex-row items-center justify-between">
+          <Text className="text-[11px] font-semibold uppercase tracking-wider text-[#7A8BAD]">
+            Real-time notifications
+          </Text>
+          <Text className="text-[11px] text-[#6B7A92]">
+            {liveNotifications.length}
+          </Text>
+        </View>
+
+        <ScrollView className="mt-2 max-h-[180px]" nestedScrollEnabled>
+          {liveNotifications.length === 0 ? (
+            <Text className="text-[12px] text-[#6B7A92]">
+              Waiting for auth and sync events.
+            </Text>
+          ) : (
+            liveNotifications.map(notification => (
+              <View
+                key={notification.id}
+                className={`mb-2 rounded-lg border px-3 py-2 ${buildNoticeClassName(notification.tone)}`}
+              >
+                <Text className="text-[13px] font-medium text-white">
+                  {notification.title}
+                </Text>
+                <Text className="mt-1 text-[12px] text-[#E7ECF8]">
+                  {notification.message}
+                </Text>
+                <Text className="mt-1 text-[10px] text-[#C5CFDF]">
+                  {formatZuluTimestamp(notification.occurredAtMs)}
+                </Text>
+              </View>
+            ))
+          )}
+        </ScrollView>
       </View>
     );
   }
@@ -1386,10 +3492,10 @@ export function AuthScreen({ loginData, dashboardData }: AuthScreenProps) {
     };
     const network = {
       id: 'network',
-      title: `Queue ${dashboardData.sync.queuedEnvelopeCount}`,
-      subtitle: `${dashboardData.sync.peerCount} peers`,
+      title: `Queue ${dashboard.sync.queuedEnvelopeCount}`,
+      subtitle: `${dashboard.sync.peerCount} peers`,
       trailingLabel:
-        dashboardData.connectivityState === 'offline' ? 'Offline' : 'Live',
+        dashboard.connectivityState === 'offline' ? 'Offline' : 'Live',
       accentClassName: 'bg-[#3F4C63]',
     };
 
@@ -1515,6 +3621,46 @@ function formatRisk(risk?: number): string {
 
 function formatStatusLabel(status: string): string {
   return status.replace(/_/g, ' ');
+}
+
+function formatPodVerificationStateLabel(
+  state:
+    | 'challenge-generated'
+    | 'verification-success'
+    | 'signature-mismatch'
+    | 'replay-rejected'
+    | 'challenge-expired',
+): string {
+  switch (state) {
+    case 'challenge-generated':
+      return 'Challenge generated';
+    case 'verification-success':
+      return 'Verification success';
+    case 'signature-mismatch':
+      return 'Signature mismatch';
+    case 'replay-rejected':
+      return 'Replay rejected';
+    case 'challenge-expired':
+      return 'Challenge expired';
+    default:
+      return 'Unknown state';
+  }
+}
+
+function formatEdgeTypeLabel(edgeType: string): string {
+  if (edgeType === 'road') {
+    return 'Road';
+  }
+
+  if (edgeType === 'waterway') {
+    return 'Waterway';
+  }
+
+  if (edgeType === 'airway') {
+    return 'Airway';
+  }
+
+  return edgeType;
 }
 
 function estimateSignalStrength(dashboardData: DashboardScreenData): number {

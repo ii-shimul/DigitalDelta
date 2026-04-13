@@ -83,6 +83,8 @@ export type DashboardConflictSummary = {
   entityType: string;
   entityId: string;
   fieldName: string;
+  localValueText?: string;
+  remoteValueText?: string;
   resolutionText?: string;
   createdAtMs: number;
   resolvedAtMs?: number;

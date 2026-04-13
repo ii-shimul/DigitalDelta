@@ -121,6 +121,23 @@ export function encodeUtf8(value: string): Uint8Array {
   return Uint8Array.from(bytes);
 }
 
+export function decodeUtf8(bytes: Uint8Array): string {
+  if (bytes.length === 0) {
+    return '';
+  }
+
+  let encoded = '';
+  for (const byte of bytes) {
+    encoded += `%${byte.toString(16).padStart(2, '0')}`;
+  }
+
+  try {
+    return decodeURIComponent(encoded);
+  } catch {
+    return '';
+  }
+}
+
 export function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
 }

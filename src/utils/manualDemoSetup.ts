@@ -20,12 +20,18 @@ export type ManualDemoSetupResult = {
 export async function runManualDemoSetup(): Promise<ManualDemoSetupResult> {
   const scenario = getPhase0DemoScenario();
 
-  await seedPhase0DemoData();
-
-  const loginData = await getLoginScreenData({
+  let loginData = await getLoginScreenData({
     userId: scenario.users[0].userId,
     deviceId: scenario.deviceIdentities[0].deviceId,
   });
+
+  if (!loginData) {
+    await seedPhase0DemoData();
+    loginData = await getLoginScreenData({
+      userId: scenario.users[0].userId,
+      deviceId: scenario.deviceIdentities[0].deviceId,
+    });
+  }
 
   const dashboardData = await getDashboardScreenData();
 

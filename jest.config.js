@@ -1,3 +1,7 @@
+const reactNativePreset = require('@react-native/jest-preset');
+
 module.exports = {
-  preset: '@react-native/jest-preset',
+  ...reactNativePreset,
+  setupFiles: ['<rootDir>/jest.setup.js'],
+  transformIgnorePatterns: [],
 };
