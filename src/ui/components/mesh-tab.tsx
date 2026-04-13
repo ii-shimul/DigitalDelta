@@ -21,6 +21,9 @@ import {
   sendMeshMessage,
   simulateRelayHop,
 } from '../../api/mesh';
+import { getBleSyncService } from '../../core/mesh/ble-sync';
+import { getBlePeripheral } from '../../core/mesh/ble-peripheral';
+import { getInventory } from '../../api/inventory';
 
 type Props = {
   user: RegisteredUser;
@@ -55,6 +58,8 @@ export function MeshTab({ user }: Props) {
   const [loading, setLoading] = useState(false);
   const [battery, setBattery] = useState(75);
   const [signal, setSignal] = useState(-65);
+  const [bleAdvertising, setBleAdvertising] = useState(false);
+  const [bleAdStatus, setBleAdStatus] = useState<string | null>(null);
 
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -138,10 +143,97 @@ export function MeshTab({ user }: Props) {
     [user, runAction],
   );
 
+  const handleStartAdvertising = useCallback(async () => {
+    try {
+      setBleAdStatus('Starting…');
+      const items = await getInventory();
+      const merged: Record<string, number> = {};
+      for (const item of items) {
+        for (const [actor, counter] of Object.entries(item.vectorClock)) {
+          merged[actor] = Math.max(merged[actor] ?? 0, counter as number);
+        }
+      }
+      await getBleSyncService().startPeripheralMode(JSON.stringify(merged));
+      setBleAdvertising(true);
+      setBleAdStatus('Advertising — ready for incoming sync');
+    } catch (e) {
+      setBleAdStatus(null);
+      Alert.alert(
+        'BLE Error',
+        e instanceof Error ? e.message : 'Failed to start advertising',
+      );
+    }
+  }, []);
+
+  const handleStopAdvertising = useCallback(async () => {
+    try {
+      await getBleSyncService().stopPeripheralMode();
+      setBleAdvertising(false);
+      setBleAdStatus(null);
+    } catch (e) {
+      Alert.alert(
+        'BLE Error',
+        e instanceof Error ? e.message : 'Failed to stop advertising',
+      );
+    }
+  }, []);
+
   const currentRole = stats?.currentRole;
 
   return (
     <View>
+      {/* BLE Peripheral Advertising */}
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>
+          BLE Advertising (M2.4 Peripheral)
+        </Text>
+        <Text style={styles.bleDesc}>
+          When advertising, nearby DigitalDelta devices acting as BLE Central
+          can discover and sync with this device directly over GATT.
+        </Text>
+        {bleAdStatus !== null && (
+          <View
+            style={[
+              styles.bleStatusBar,
+              bleAdvertising ? styles.bleStatusOn : styles.bleStatusOff,
+            ]}
+          >
+            <Text style={styles.bleStatusText}>{bleAdStatus}</Text>
+          </View>
+        )}
+        <View style={styles.actionRow}>
+          <TouchableOpacity
+            style={[
+              styles.btnPrimary,
+              styles.btnHalf,
+              (bleAdvertising || loading) && styles.btnDisabled,
+            ]}
+            onPress={handleStartAdvertising}
+            disabled={bleAdvertising || loading}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.btnPrimaryText}>📡 Start Advertising</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[
+              styles.btnSecondary,
+              styles.btnHalf,
+              (!bleAdvertising || loading) && styles.btnDisabled,
+            ]}
+            onPress={handleStopAdvertising}
+            disabled={!bleAdvertising || loading}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.btnSecondaryText}>⛔ Stop Advertising</Text>
+          </TouchableOpacity>
+        </View>
+        {getBlePeripheral().isSupported === false && (
+          <Text style={styles.bleUnsupported}>
+            Native BLE Peripheral module not available on this platform.
+          </Text>
+        )}
+      </View>
+
       {/* Header */}
       <View style={styles.hero}>
         <Text style={styles.eyebrow}>STORE-AND-FORWARD · E2E ENCRYPTED</Text>
@@ -604,4 +696,28 @@ const styles = StyleSheet.create({
   roleDot: { width: 8, height: 8, borderRadius: 4 },
   logRole: { fontSize: 11, fontWeight: '800', color: '#131b2e' },
   logReason: { flex: 1, fontSize: 11, color: '#565e74', lineHeight: 16 },
+  bleDesc: { fontSize: 12, color: '#565e74', lineHeight: 18, marginBottom: 10 },
+  bleStatusBar: {
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    marginBottom: 10,
+  },
+  bleStatusOn: {
+    backgroundColor: '#e6f9ee',
+    borderWidth: 1,
+    borderColor: '#38a169',
+  },
+  bleStatusOff: {
+    backgroundColor: '#fff5f5',
+    borderWidth: 1,
+    borderColor: '#e53e3e',
+  },
+  bleStatusText: { fontSize: 12, fontWeight: '600', color: '#131b2e' },
+  bleUnsupported: {
+    marginTop: 8,
+    fontSize: 11,
+    color: '#e53e3e',
+    fontStyle: 'italic',
+  },
 });

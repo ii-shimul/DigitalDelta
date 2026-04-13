@@ -1,6 +1,8 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Alert,
+  Animated,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -11,26 +13,21 @@ import {
 import type { RegisteredUser } from '../../api/auth';
 import {
   type CrdtConflict,
+  type MutationHistoryEntry,
   type SupplyItem,
   type SyncResult,
   addInventoryItem,
   getConflicts,
   getInventory,
+  getMutationHistory,
   resolveConflict,
   simulateSyncFromDevice,
   updateItemQuantity,
 } from '../../api/inventory';
+import { Colors, CATEGORY_COLOR, Spacing, Radii, Typography } from '../theme';
 
 const CATEGORIES = ['Medical', 'Food', 'Water', 'Shelter', 'Equipment'];
 const UNITS = ['pcs', 'kg', 'L', 'boxes', 'kits', 'cans'];
-
-const CATEGORY_COLOR: Record<string, string> = {
-  Medical: '#e53e3e',
-  Food: '#d69e2e',
-  Water: '#3182ce',
-  Shelter: '#38a169',
-  Equipment: '#805ad5',
-};
 
 const CAN_WRITE: Record<string, boolean> = {
   SUPPLY_MANAGER: true,
@@ -50,6 +47,8 @@ export function InventoryTab({ user }: Props) {
   const [syncing, setSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState<SyncResult | null>(null);
   const [showAdd, setShowAdd] = useState(false);
+  const [scanCountdown, setScanCountdown] = useState<number | null>(null);
+  const scanTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Add-item form state
   const [newName, setNewName] = useState('');
@@ -58,6 +57,11 @@ export function InventoryTab({ user }: Props) {
   const [newUnit, setNewUnit] = useState('pcs');
 
   const canWrite = CAN_WRITE[user.role] ?? false;
+  const [historyItemId, setHistoryItemId] = useState<string | null>(null);
+  const [historyEntries, setHistoryEntries] = useState<MutationHistoryEntry[]>(
+    [],
+  );
+  const historyFadeAnim = useRef(new Animated.Value(0)).current;
 
   const loadData = useCallback(async () => {
     const [inv, conf] = await Promise.all([getInventory(), getConflicts()]);
@@ -68,6 +72,26 @@ export function InventoryTab({ user }: Props) {
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  const handleShowHistory = useCallback(
+    async (itemId: string) => {
+      if (historyItemId === itemId) {
+        setHistoryItemId(null);
+        setHistoryEntries([]);
+        return;
+      }
+      const entries = await getMutationHistory(itemId);
+      setHistoryEntries(entries);
+      setHistoryItemId(itemId);
+      historyFadeAnim.setValue(0);
+      Animated.timing(historyFadeAnim, {
+        toValue: 1,
+        duration: 300,
+        useNativeDriver: true,
+      }).start();
+    },
+    [historyItemId, historyFadeAnim],
+  );
 
   const handleAddItem = useCallback(async () => {
     const qty = parseInt(newQuantity, 10);
@@ -108,6 +132,17 @@ export function InventoryTab({ user }: Props) {
     }
     setSyncing(true);
     setSyncResult(null);
+    // Start 8-second BLE scan countdown
+    setScanCountdown(8);
+    scanTimerRef.current = setInterval(() => {
+      setScanCountdown(prev => {
+        if (prev === null || prev <= 1) {
+          if (scanTimerRef.current) clearInterval(scanTimerRef.current);
+          return null;
+        }
+        return prev - 1;
+      });
+    }, 1000);
     try {
       const result = await simulateSyncFromDevice();
       setSyncResult(result);
@@ -118,12 +153,14 @@ export function InventoryTab({ user }: Props) {
         e instanceof Error ? e.message : 'Unknown error',
       );
     } finally {
+      if (scanTimerRef.current) clearInterval(scanTimerRef.current);
+      setScanCountdown(null);
       setSyncing(false);
     }
   }, [items.length, loadData]);
 
   const handleResolve = useCallback(
-    async (conflict: CrdtConflict, choice: 'local' | 'remote') => {
+    async (conflict: CrdtConflict, choice: 'local' | 'remote' | 'merge') => {
       await resolveConflict(conflict.conflictId, choice);
       await loadData();
     },
@@ -183,22 +220,23 @@ export function InventoryTab({ user }: Props) {
             <View key={c.conflictId} style={styles.conflictCard}>
               <Text style={styles.conflictName}>{c.itemName}</Text>
               <Text style={styles.conflictMeta}>
-                Remote device: {c.remoteDeviceId}
+                Remote: {c.remoteDeviceId}
               </Text>
+              {/* M2.3 – side-by-side values */}
               <View style={styles.conflictValues}>
                 <TouchableOpacity
                   style={styles.conflictOption}
                   onPress={() => handleResolve(c, 'local')}
                   activeOpacity={0.8}
                 >
-                  <Text style={styles.conflictOptionLabel}>Local</Text>
+                  <Text style={styles.conflictOptionLabel}>Mine</Text>
                   <Text style={styles.conflictOptionValue}>
                     {c.localQuantity}
                   </Text>
                   <Text style={styles.conflictOptionClock}>
                     {JSON.stringify(c.localClock)}
                   </Text>
-                  <Text style={styles.conflictKeep}>Keep →</Text>
+                  <Text style={styles.conflictKeep}>Keep Mine</Text>
                 </TouchableOpacity>
 
                 <View style={styles.conflictVs}>
@@ -210,16 +248,28 @@ export function InventoryTab({ user }: Props) {
                   onPress={() => handleResolve(c, 'remote')}
                   activeOpacity={0.8}
                 >
-                  <Text style={styles.conflictOptionLabel}>Remote</Text>
+                  <Text style={styles.conflictOptionLabel}>Theirs</Text>
                   <Text style={styles.conflictOptionValue}>
                     {c.remoteQuantity}
                   </Text>
                   <Text style={styles.conflictOptionClock}>
                     {JSON.stringify(c.remoteClock)}
                   </Text>
-                  <Text style={styles.conflictKeep}>Keep →</Text>
+                  <Text style={styles.conflictKeep}>Keep Theirs</Text>
                 </TouchableOpacity>
               </View>
+
+              {/* M2.3 – Merge button (floor-average) */}
+              <TouchableOpacity
+                style={styles.btnMerge}
+                onPress={() => handleResolve(c, 'merge')}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.btnMergeText}>
+                  Merge — avg:{' '}
+                  {Math.floor((c.localQuantity + c.remoteQuantity) / 2)}
+                </Text>
+              </TouchableOpacity>
             </View>
           ))}
         </View>
@@ -228,7 +278,21 @@ export function InventoryTab({ user }: Props) {
       {/* Last sync result */}
       {syncResult && (
         <View style={styles.syncResultCard}>
-          <Text style={styles.syncResultTitle}>Sync Complete</Text>
+          <View style={styles.syncResultTitleRow}>
+            <Text style={styles.syncResultTitle}>Sync Complete</Text>
+            <View
+              style={[
+                styles.transportBadge,
+                syncResult.transport === 'ble'
+                  ? styles.transportBle
+                  : styles.transportSim,
+              ]}
+            >
+              <Text style={styles.transportBadgeText}>
+                {syncResult.transport === 'ble' ? 'BLE' : 'Simulated'}
+              </Text>
+            </View>
+          </View>
           <Text style={styles.syncResultText}>
             Remote: {syncResult.remoteDeviceId}
           </Text>
@@ -236,23 +300,23 @@ export function InventoryTab({ user }: Props) {
             <SyncBadge
               label="Local Wins"
               value={syncResult.localWins}
-              color="#38a169"
+              color={Colors.verified}
             />
             <SyncBadge
               label="Remote Wins"
               value={syncResult.remoteWins}
-              color="#3182ce"
+              color={Colors.tealLight}
             />
             <SyncBadge
               label="Conflicts"
               value={syncResult.conflicts}
-              color="#e53e3e"
+              color={Colors.orange}
             />
             {syncResult.newItems > 0 && (
               <SyncBadge
                 label="New Items"
                 value={syncResult.newItems}
-                color="#805ad5"
+                color={Colors.catEquipment}
               />
             )}
           </View>
@@ -345,6 +409,70 @@ export function InventoryTab({ user }: Props) {
                       ))
                     )}
                   </View>
+
+                  {/* M2.2 – Causal history drill-down */}
+                  <TouchableOpacity
+                    style={styles.historyToggleBtn}
+                    onPress={() => handleShowHistory(item.itemId)}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={styles.historyToggleText}>
+                      {historyItemId === item.itemId
+                        ? 'Hide history'
+                        : 'Show causal history'}
+                    </Text>
+                  </TouchableOpacity>
+
+                  {historyItemId === item.itemId && (
+                    <Animated.View
+                      style={[
+                        styles.historySection,
+                        { opacity: historyFadeAnim },
+                      ]}
+                    >
+                      {historyEntries.length === 0 ? (
+                        <Text style={styles.historyEmpty}>
+                          No history recorded yet.
+                        </Text>
+                      ) : (
+                        historyEntries.map((entry, idx) => (
+                          <View
+                            key={entry.mutationId}
+                            style={styles.historyRow}
+                          >
+                            <View style={styles.historyLine}>
+                              <View
+                                style={[
+                                  styles.historyDot,
+                                  idx === historyEntries.length - 1 &&
+                                    styles.historyDotLatest,
+                                ]}
+                              />
+                              {idx < historyEntries.length - 1 && (
+                                <View style={styles.historyConnector} />
+                              )}
+                            </View>
+                            <View style={styles.historyContent}>
+                              <Text style={styles.historyActor}>
+                                {entry.actorDeviceId.slice(-8)}
+                              </Text>
+                              <Text style={styles.historyQty}>
+                                {entry.oldQuantity != null
+                                  ? `${entry.oldQuantity} → `
+                                  : ''}
+                                {entry.newQuantity}
+                              </Text>
+                              <Text style={styles.historyTime}>
+                                {new Date(
+                                  entry.occurredAtMs,
+                                ).toLocaleTimeString()}
+                              </Text>
+                            </View>
+                          </View>
+                        ))
+                      )}
+                    </Animated.View>
+                  )}
                 </View>
               );
             })}
@@ -462,9 +590,37 @@ export function InventoryTab({ user }: Props) {
           activeOpacity={0.8}
         >
           <Text style={styles.btnSecondaryText}>
-            {syncing ? 'Syncing...' : '⟳ Simulate Sync from Remote Device'}
+            {scanCountdown !== null
+              ? `📡 Scanning for BLE peer… ${scanCountdown}s`
+              : syncing
+              ? '⏳ Applying CRDT delta…'
+              : '⟳ Sync with Remote Device (BLE)'}
           </Text>
         </TouchableOpacity>
+
+        {/* BLE status banner – shown after sync attempt */}
+        {syncResult && (
+          <View
+            style={[
+              styles.bleSyncBanner,
+              syncResult.bleStatus === 'success'
+                ? styles.bleBannerSuccess
+                : syncResult.bleStatus === 'error'
+                ? styles.bleBannerError
+                : styles.bleBannerWarn,
+            ]}
+          >
+            <Text style={styles.bleSyncBannerText}>
+              {syncResult.bleStatus === 'success'
+                ? '📶 BLE sync completed with real device'
+                : syncResult.bleStatus === 'error'
+                ? `⚠️ BLE error — ${syncResult.bleError ?? 'unknown'}`
+                : syncResult.bleStatus === 'no_peer'
+                ? `📵 No BLE peer found — Make sure the other phone tapped "Start Advertising" on the Mesh tab.`
+                : '🧙 Simulation only (no BLE attempted)'}
+            </Text>
+          </View>
+        )}
       </View>
     </View>
   );
@@ -489,161 +645,167 @@ function SyncBadge({
 
 const styles = StyleSheet.create({
   hero: {
-    marginBottom: 20,
+    marginBottom: Spacing.lg,
   },
   heroEyebrow: {
-    fontSize: 11,
-    fontWeight: '600',
+    fontSize: Typography.fontSizeXs,
+    fontWeight: Typography.fontWeightSemibold,
     letterSpacing: 2,
-    color: '#0058be',
+    color: Colors.tealMid,
     marginBottom: 4,
+    textTransform: 'uppercase',
   },
   heroTitle: {
     fontSize: 28,
-    fontWeight: '800',
-    color: '#131b2e',
+    fontWeight: Typography.fontWeightBold,
+    color: Colors.textPrimary,
     marginBottom: 6,
   },
   heroSub: {
-    fontSize: 13,
-    color: '#565e74',
+    fontSize: Typography.fontSizeSm,
+    color: Colors.textSecondary,
     lineHeight: 19,
   },
   statsRow: {
     flexDirection: 'row',
     gap: 10,
-    marginBottom: 20,
+    marginBottom: Spacing.lg,
   },
   statBadge: {
     flex: 1,
-    backgroundColor: '#f2f3ff',
-    borderRadius: 12,
-    paddingVertical: 12,
+    backgroundColor: Colors.bgGlass,
+    borderRadius: Radii.md,
+    paddingVertical: Spacing.md,
     alignItems: 'center',
+    borderWidth: 1,
+    borderColor: Colors.border,
   },
   statBadgeWarn: {
-    backgroundColor: '#fff3cd',
+    borderColor: Colors.borderWarn,
+    backgroundColor: Colors.conflictFaint,
   },
   statNum: {
-    fontSize: 18,
-    fontWeight: '800',
-    color: '#131b2e',
+    fontSize: Typography.fontSizeLg,
+    fontWeight: Typography.fontWeightBold,
+    color: Colors.tealLight,
   },
   statNumWarn: {
-    color: '#d69e2e',
+    color: Colors.orange,
   },
   statLbl: {
-    fontSize: 11,
-    color: '#565e74',
+    fontSize: Typography.fontSizeXs,
+    color: Colors.textSecondary,
     marginTop: 2,
   },
   statLblWarn: {
-    color: '#d69e2e',
+    color: Colors.orange,
   },
   section: {
-    marginBottom: 20,
+    marginBottom: Spacing.lg,
   },
   sectionTitle: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: '#131b2e',
+    fontSize: Typography.fontSizeMd,
+    fontWeight: Typography.fontWeightBold,
+    color: Colors.textPrimary,
     marginBottom: 6,
   },
   sectionSub: {
-    fontSize: 12,
-    color: '#565e74',
+    fontSize: Typography.fontSizeSm,
+    color: Colors.textSecondary,
     marginBottom: 10,
     lineHeight: 17,
   },
   emptyCard: {
-    backgroundColor: '#f2f3ff',
-    borderRadius: 16,
-    padding: 20,
+    backgroundColor: Colors.bgGlass,
+    borderRadius: Radii.lg,
+    padding: Spacing.lg,
     alignItems: 'center',
-    gap: 8,
+    gap: Spacing.sm,
+    borderWidth: 1,
+    borderColor: Colors.border,
   },
   emptyText: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: '#131b2e',
+    fontSize: Typography.fontSizeLg,
+    fontWeight: Typography.fontWeightBold,
+    color: Colors.textPrimary,
   },
   emptyHint: {
-    fontSize: 13,
-    color: '#565e74',
+    fontSize: Typography.fontSizeSm,
+    color: Colors.textSecondary,
     textAlign: 'center',
     lineHeight: 18,
   },
   itemCard: {
-    backgroundColor: '#f8f9ff',
-    borderRadius: 16,
+    backgroundColor: Colors.bgGlass,
+    borderRadius: Radii.lg,
     padding: 14,
     marginBottom: 10,
     borderWidth: 1,
-    borderColor: '#e4e6f0',
+    borderColor: Colors.border,
   },
   itemCardConflict: {
-    borderColor: '#e53e3e',
-    backgroundColor: '#fff5f5',
+    borderColor: Colors.orange,
+    backgroundColor: Colors.conflictFaint,
   },
   itemTop: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: Spacing.sm,
     marginBottom: 6,
   },
   catBadge: {
-    borderRadius: 6,
-    paddingHorizontal: 8,
+    borderRadius: Radii.sm,
+    paddingHorizontal: Spacing.sm,
     paddingVertical: 3,
   },
   catText: {
-    fontSize: 11,
-    fontWeight: '700',
+    fontSize: Typography.fontSizeXs,
+    fontWeight: Typography.fontWeightBold,
   },
   conflictBadge: {
-    backgroundColor: '#fff0f0',
-    borderRadius: 6,
+    backgroundColor: Colors.conflictFaint,
+    borderRadius: Radii.sm,
     paddingHorizontal: 6,
     paddingVertical: 3,
     borderWidth: 1,
-    borderColor: '#e53e3e',
+    borderColor: Colors.orange,
   },
   conflictBadgeText: {
-    fontSize: 10,
-    color: '#e53e3e',
-    fontWeight: '800',
+    fontSize: Typography.fontSizeXs,
+    color: Colors.orange,
+    fontWeight: Typography.fontWeightBold,
     letterSpacing: 0.5,
   },
   itemName: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: '#131b2e',
-    marginBottom: 8,
+    fontSize: Typography.fontSizeLg,
+    fontWeight: Typography.fontWeightBold,
+    color: Colors.textPrimary,
+    marginBottom: Spacing.sm,
   },
   itemQtyRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
-    marginBottom: 8,
+    gap: Spacing.md,
+    marginBottom: Spacing.sm,
   },
   qtyBtn: {
     width: 32,
     height: 32,
-    borderRadius: 8,
-    backgroundColor: '#0058be',
+    borderRadius: Radii.sm,
+    backgroundColor: Colors.teal,
     justifyContent: 'center',
     alignItems: 'center',
   },
   qtyBtnText: {
-    color: '#fff',
+    color: Colors.white,
     fontSize: 18,
-    fontWeight: '700',
+    fontWeight: Typography.fontWeightBold,
     lineHeight: 20,
   },
   qtyValue: {
     fontSize: 17,
-    fontWeight: '700',
-    color: '#131b2e',
+    fontWeight: Typography.fontWeightBold,
+    color: Colors.textPrimary,
     minWidth: 60,
     textAlign: 'center',
   },
@@ -652,184 +814,325 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     alignItems: 'center',
     gap: 4,
+    marginBottom: 6,
   },
   clockLabel: {
-    fontSize: 10,
-    color: '#9da3b0',
+    fontSize: Typography.fontSizeXs,
+    color: Colors.textMuted,
     fontFamily: 'monospace',
   },
   clockEntry: {
-    fontSize: 10,
-    color: '#0058be',
+    fontSize: Typography.fontSizeXs,
+    color: Colors.tealLight,
     fontFamily: 'monospace',
-    backgroundColor: '#e8ecff',
+    backgroundColor: Colors.tealFaint,
     paddingHorizontal: 5,
     paddingVertical: 2,
     borderRadius: 4,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  historyToggleBtn: {
+    alignSelf: 'flex-start',
+    marginTop: 4,
+  },
+  historyToggleText: {
+    fontSize: Typography.fontSizeXs,
+    color: Colors.tealMid,
+    fontWeight: Typography.fontWeightSemibold,
+    textDecorationLine: 'underline',
+  },
+  historySection: {
+    marginTop: Spacing.sm,
+    paddingLeft: Spacing.sm,
+    borderLeftWidth: 2,
+    borderLeftColor: Colors.tealFaint,
+  },
+  historyEmpty: {
+    fontSize: Typography.fontSizeXs,
+    color: Colors.textMuted,
+    fontStyle: 'italic',
+  },
+  historyRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginBottom: 6,
+    gap: 6,
+  },
+  historyLine: {
+    alignItems: 'center',
+    width: 14,
+  },
+  historyDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: Colors.tealMid,
+    marginTop: 3,
+  },
+  historyDotLatest: {
+    backgroundColor: Colors.tealLight,
+  },
+  historyConnector: {
+    width: 2,
+    flex: 1,
+    backgroundColor: Colors.tealFaint,
+    marginTop: 2,
+  },
+  historyContent: {
+    flex: 1,
+    flexDirection: 'row',
+    gap: Spacing.sm,
+    alignItems: 'center',
+  },
+  historyActor: {
+    fontSize: Typography.fontSizeXs,
+    color: Colors.textSecondary,
+    fontFamily: 'monospace',
+    flex: 1,
+  },
+  historyQty: {
+    fontSize: Typography.fontSizeXs,
+    color: Colors.tealLight,
+    fontWeight: Typography.fontWeightSemibold,
+    fontFamily: 'monospace',
+  },
+  historyTime: {
+    fontSize: Typography.fontSizeXs,
+    color: Colors.textMuted,
+    fontFamily: 'monospace',
   },
   conflictCard: {
-    backgroundColor: '#fff5f5',
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 12,
+    backgroundColor: Colors.conflictFaint,
+    borderRadius: Radii.lg,
+    padding: Spacing.md,
+    marginBottom: Spacing.md,
     borderWidth: 1,
-    borderColor: '#e53e3e',
+    borderColor: Colors.borderWarn,
   },
   conflictName: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: '#131b2e',
+    fontSize: Typography.fontSizeLg,
+    fontWeight: Typography.fontWeightBold,
+    color: Colors.textPrimary,
     marginBottom: 2,
   },
   conflictMeta: {
-    fontSize: 11,
-    color: '#9da3b0',
+    fontSize: Typography.fontSizeXs,
+    color: Colors.textMuted,
     fontFamily: 'monospace',
-    marginBottom: 12,
+    marginBottom: Spacing.md,
   },
   conflictValues: {
     flexDirection: 'row',
-    gap: 8,
+    gap: Spacing.sm,
     alignItems: 'center',
+    marginBottom: Spacing.sm,
   },
   conflictOption: {
     flex: 1,
-    backgroundColor: '#fff',
-    borderRadius: 12,
-    padding: 12,
-    borderWidth: 2,
-    borderColor: '#e4e6f0',
+    backgroundColor: Colors.bgGlassElevated,
+    borderRadius: Radii.md,
+    padding: Spacing.md,
+    borderWidth: 1,
+    borderColor: Colors.border,
     alignItems: 'center',
     gap: 4,
   },
   conflictOptionLabel: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#565e74',
+    fontSize: Typography.fontSizeXs,
+    fontWeight: Typography.fontWeightBold,
+    color: Colors.textSecondary,
     textTransform: 'uppercase',
     letterSpacing: 0.5,
   },
   conflictOptionValue: {
     fontSize: 22,
-    fontWeight: '800',
-    color: '#131b2e',
+    fontWeight: Typography.fontWeightBold,
+    color: Colors.textPrimary,
   },
   conflictOptionClock: {
     fontSize: 9,
-    color: '#9da3b0',
+    color: Colors.textMuted,
     fontFamily: 'monospace',
     textAlign: 'center',
   },
   conflictKeep: {
-    fontSize: 12,
-    color: '#0058be',
-    fontWeight: '700',
+    fontSize: Typography.fontSizeSm,
+    color: Colors.tealLight,
+    fontWeight: Typography.fontWeightBold,
   },
   conflictVs: {
     paddingHorizontal: 6,
   },
   conflictVsText: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: '#c2c6d6',
+    fontSize: Typography.fontSizeSm,
+    fontWeight: Typography.fontWeightBold,
+    color: Colors.textMuted,
+  },
+  btnMerge: {
+    backgroundColor: Colors.orangeFaint,
+    borderRadius: Radii.md,
+    paddingVertical: 10,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: Colors.borderWarn,
+    marginTop: 2,
+  },
+  btnMergeText: {
+    fontSize: Typography.fontSizeSm,
+    color: Colors.orangeLight,
+    fontWeight: Typography.fontWeightBold,
   },
   syncResultCard: {
-    backgroundColor: '#f0fff4',
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 20,
+    backgroundColor: Colors.verifiedFaint,
+    borderRadius: Radii.lg,
+    padding: Spacing.md,
+    marginBottom: Spacing.lg,
     borderWidth: 1,
-    borderColor: '#38a169',
+    borderColor: 'rgba(46, 204, 113, 0.35)',
   },
-  syncResultTitle: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: '#276749',
+  syncResultTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
     marginBottom: 4,
   },
+  syncResultTitle: {
+    fontSize: Typography.fontSizeMd,
+    fontWeight: Typography.fontWeightBold,
+    color: Colors.verified,
+  },
+  transportBadge: {
+    borderRadius: Radii.pill,
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: 3,
+  },
+  transportBle: {
+    backgroundColor: Colors.syncingFaint,
+    borderWidth: 1,
+    borderColor: Colors.borderFocus,
+  },
+  transportSim: {
+    backgroundColor: Colors.bgGlass,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  transportBadgeText: {
+    fontSize: Typography.fontSizeXs,
+    fontWeight: Typography.fontWeightBold,
+    color: Colors.tealLight,
+  },
+  bleSyncBanner: {
+    marginTop: 10,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderWidth: 1,
+  },
+  bleBannerSuccess: {
+    backgroundColor: 'rgba(56,161,105,0.15)',
+    borderColor: '#38a169',
+  },
+  bleBannerError: {
+    backgroundColor: 'rgba(229,62,62,0.15)',
+    borderColor: '#e53e3e',
+  },
+  bleBannerWarn: {
+    backgroundColor: 'rgba(255,107,53,0.12)',
+    borderColor: Colors.orange,
+  },
+  bleSyncBannerText: {
+    fontSize: 12,
+    color: Colors.textPrimary,
+    lineHeight: 18,
+  },
   syncResultText: {
-    fontSize: 11,
-    color: '#565e74',
+    fontSize: Typography.fontSizeXs,
+    color: Colors.textMuted,
     fontFamily: 'monospace',
     marginBottom: 10,
   },
   syncResultRow: {
     flexDirection: 'row',
-    gap: 8,
+    gap: Spacing.sm,
     flexWrap: 'wrap',
   },
   syncBadge: {
-    borderRadius: 8,
+    borderRadius: Radii.sm,
     paddingHorizontal: 10,
     paddingVertical: 6,
     alignItems: 'center',
     minWidth: 64,
+    borderWidth: 1,
+    borderColor: 'transparent',
   },
   syncBadgeNum: {
-    fontSize: 16,
-    fontWeight: '800',
+    fontSize: Typography.fontSizeLg,
+    fontWeight: Typography.fontWeightBold,
   },
   syncBadgeLbl: {
-    fontSize: 10,
-    fontWeight: '600',
+    fontSize: Typography.fontSizeXs,
+    fontWeight: Typography.fontWeightSemibold,
   },
   actions: {
-    gap: 12,
-    marginBottom: 20,
+    gap: Spacing.md,
+    marginBottom: Spacing.lg,
   },
   btnPrimary: {
-    backgroundColor: '#0058be',
-    borderRadius: 14,
+    backgroundColor: Colors.teal,
+    borderRadius: Radii.lg,
     paddingVertical: 14,
     alignItems: 'center',
   },
   btnPrimaryText: {
-    color: '#fff',
-    fontSize: 15,
-    fontWeight: '700',
+    color: Colors.white,
+    fontSize: Typography.fontSizeLg,
+    fontWeight: Typography.fontWeightBold,
   },
   btnSecondary: {
-    backgroundColor: '#f2f3ff',
-    borderRadius: 14,
+    backgroundColor: Colors.bgGlass,
+    borderRadius: Radii.lg,
     paddingVertical: 14,
     alignItems: 'center',
     borderWidth: 1,
-    borderColor: '#c2c6d6',
+    borderColor: Colors.borderFocus,
   },
   btnSecondaryText: {
-    color: '#131b2e',
-    fontSize: 14,
-    fontWeight: '600',
+    color: Colors.tealLight,
+    fontSize: Typography.fontSizeMd,
+    fontWeight: Typography.fontWeightSemibold,
   },
   btnDisabled: {
     opacity: 0.5,
   },
   addForm: {
-    backgroundColor: '#f8f9ff',
-    borderRadius: 16,
-    padding: 16,
+    backgroundColor: Colors.bgGlassElevated,
+    borderRadius: Radii.lg,
+    padding: Spacing.md,
     gap: 10,
     borderWidth: 1,
-    borderColor: '#e4e6f0',
+    borderColor: Colors.border,
   },
   formLabel: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: '#131b2e',
+    fontSize: Typography.fontSizeSm,
+    fontWeight: Typography.fontWeightBold,
+    color: Colors.textSecondary,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
   },
   formInput: {
-    backgroundColor: '#fff',
-    borderRadius: 10,
+    backgroundColor: Colors.bgSurface,
+    borderRadius: Radii.md,
     paddingHorizontal: 14,
-    paddingVertical: 12,
-    fontSize: 15,
-    color: '#131b2e',
+    paddingVertical: Spacing.md,
+    fontSize: Typography.fontSizeLg,
+    color: Colors.textPrimary,
     borderWidth: 1,
-    borderColor: '#c2c6d6',
+    borderColor: Colors.borderFocus,
   },
   formRow: {
     flexDirection: 'row',
-    gap: 12,
+    gap: Spacing.md,
   },
   formHalf: {
     flex: 1,
@@ -846,20 +1149,23 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   chip: {
-    borderRadius: 8,
+    borderRadius: Radii.sm,
     paddingHorizontal: 10,
     paddingVertical: 6,
-    backgroundColor: '#e8ecff',
+    backgroundColor: Colors.tealFaint,
+    borderWidth: 1,
+    borderColor: Colors.border,
   },
   chipSelected: {
-    backgroundColor: '#0058be',
+    backgroundColor: Colors.teal,
+    borderColor: Colors.tealLight,
   },
   chipText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#0058be',
+    fontSize: Typography.fontSizeSm,
+    fontWeight: Typography.fontWeightSemibold,
+    color: Colors.tealLight,
   },
   chipTextSelected: {
-    color: '#fff',
+    color: Colors.white,
   },
 });

@@ -17,6 +17,41 @@ export type SupplyItem = {
   updatedAtMs: number;
 };
 
+/**
+ * M2.1 – OR-Set tag for supply item lifecycle.
+ * An item is alive if at least one tag is NOT tombstoned.
+ * Concurrent add+remove is safe: only the specific add-tag is removed.
+ */
+export type ORSetTag = {
+  tagId: string;
+  itemId: string;
+  actorDeviceId: string;
+  addedAtMs: number;
+  tombstonedAtMs?: number;
+  tombstoneDeviceId?: string;
+};
+
+/** True when an OR-Set of tags still has a live (non-tombstoned) entry. */
+export function isORSetAlive(tags: ORSetTag[]): boolean {
+  return tags.some(t => t.tombstonedAtMs == null);
+}
+
+/**
+ * M2.2 – Single mutation history entry for causal chain reconstruction.
+ * previousMutationId links entries into a causally-ordered linked list.
+ */
+export type MutationHistoryEntry = {
+  mutationId: string;
+  itemId: string;
+  actorDeviceId: string;
+  eventType: 'create' | 'update' | 'delete';
+  oldQuantity?: number;
+  newQuantity: number;
+  vectorClock: VectorClockMap;
+  previousMutationId?: string;
+  occurredAtMs: number;
+};
+
 export type CrdtConflict = {
   conflictId: string;
   itemId: string;
@@ -28,7 +63,7 @@ export type CrdtConflict = {
   remoteDeviceId: string;
   detectedAtMs: number;
   resolvedAtMs?: number;
-  resolutionChoice?: 'local' | 'remote';
+  resolutionChoice?: 'local' | 'remote' | 'merge';
   resolvedQuantity?: number;
 };
 
@@ -112,16 +147,26 @@ export function mergeItem(
 }
 
 /**
- * Resolve a conflict by picking one side and merging the vector clocks.
- * Returns the quantity to persist and the merged clock.
+ * Resolve a conflict by picking one side or merging (floor-average), and
+ * merging the vector clocks in all cases to advance causal history.
  */
 export function resolveConflictMerge(
   conflict: CrdtConflict,
-  choice: 'local' | 'remote',
+  choice: 'local' | 'remote' | 'merge',
 ): { resolvedQuantity: number; mergedClock: VectorClockMap } {
+  let resolvedQuantity: number;
+  if (choice === 'local') {
+    resolvedQuantity = conflict.localQuantity;
+  } else if (choice === 'remote') {
+    resolvedQuantity = conflict.remoteQuantity;
+  } else {
+    // merge = floor((local + remote) / 2)
+    resolvedQuantity = Math.floor(
+      (conflict.localQuantity + conflict.remoteQuantity) / 2,
+    );
+  }
   return {
-    resolvedQuantity:
-      choice === 'local' ? conflict.localQuantity : conflict.remoteQuantity,
+    resolvedQuantity,
     mergedClock: mergeVectorClocks(conflict.localClock, conflict.remoteClock),
   };
 }

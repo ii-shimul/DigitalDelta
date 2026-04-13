@@ -1,6 +1,7 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Alert,
+  Animated,
   ScrollView,
   StyleSheet,
   Text,
@@ -8,6 +9,14 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import {
+  Colors,
+  Spacing,
+  Radii,
+  Typography,
+  STATE_META,
+  type SystemState,
+} from '../theme';
 
 import type { RegisteredUser } from '../../api/auth';
 import {
@@ -105,38 +114,7 @@ const ROLE_TAB_ACCESS: Record<AppRole, readonly Tab[]> = {
   ],
 };
 
-/** A5 — System state shown across all tabs */
-type SystemState = 'offline' | 'syncing' | 'conflict' | 'verified';
-
-const STATE_META: Record<
-  SystemState,
-  { label: string; color: string; bg: string; dot: string }
-> = {
-  offline: {
-    label: 'Offline',
-    color: '#565e74',
-    bg: '#f2f3ff',
-    dot: '#9da3b0',
-  },
-  syncing: {
-    label: 'Syncing…',
-    color: '#0058be',
-    bg: '#e0ecff',
-    dot: '#3182ce',
-  },
-  conflict: {
-    label: 'Conflict Detected',
-    color: '#93000a',
-    bg: '#ffdad6',
-    dot: '#e53e3e',
-  },
-  verified: {
-    label: 'Verified',
-    color: '#006947',
-    bg: '#d4edda',
-    dot: '#38a169',
-  },
-};
+/** A5 — System state shown across all tabs (from theme) */
 
 export default function HomeScreen({ user, onLogout }: Props) {
   const [activeTab, setActiveTab] = useState<Tab>('mission');
@@ -154,6 +132,30 @@ export default function HomeScreen({ user, onLogout }: Props) {
   // A5 — dynamic system state for the persistent banner
   const [systemState, setSystemState] = useState<SystemState>('offline');
   const [conflictCount, setConflictCount] = useState(0);
+
+  // Pulse animation for the syncing indicator dot
+  const pulseAnim = useRef(new Animated.Value(1)).current;
+  useEffect(() => {
+    if (systemState === 'syncing') {
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(pulseAnim, {
+            toValue: 0.25,
+            duration: 700,
+            useNativeDriver: true,
+          }),
+          Animated.timing(pulseAnim, {
+            toValue: 1,
+            duration: 700,
+            useNativeDriver: true,
+          }),
+        ]),
+      ).start();
+    } else {
+      pulseAnim.stopAnimation();
+      pulseAnim.setValue(1);
+    }
+  }, [systemState, pulseAnim]);
 
   useEffect(() => {
     if (user.deviceId) {
@@ -260,17 +262,23 @@ export default function HomeScreen({ user, onLogout }: Props) {
       <View
         style={[
           styles.stateBanner,
-          { backgroundColor: STATE_META[systemState].bg },
+          {
+            backgroundColor: STATE_META[systemState].bg,
+            borderColor: STATE_META[systemState].border,
+          },
         ]}
         accessibilityRole="alert"
         accessibilityLabel={`System state: ${STATE_META[systemState].label}${
           conflictCount > 0 ? `, ${conflictCount} conflicts` : ''
         }`}
       >
-        <View
+        <Animated.View
           style={[
             styles.stateDot,
-            { backgroundColor: STATE_META[systemState].dot },
+            {
+              backgroundColor: STATE_META[systemState].dot,
+              opacity: pulseAnim,
+            },
           ]}
         />
         <Text
@@ -679,15 +687,16 @@ function DetailRow({
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#faf8ff',
+    backgroundColor: Colors.bgBase,
   },
   // A5 — State banner
   stateBanner: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 24,
-    paddingVertical: 8,
-    gap: 8,
+    paddingHorizontal: Spacing.lg,
+    paddingVertical: Spacing.sm,
+    gap: Spacing.sm,
+    borderBottomWidth: 1,
   },
   stateDot: {
     width: 10,
@@ -695,13 +704,13 @@ const styles = StyleSheet.create({
     borderRadius: 5,
   },
   stateLabel: {
-    fontSize: 12,
-    fontWeight: '700',
+    fontSize: Typography.fontSizeSm,
+    fontWeight: Typography.fontWeightBold,
     letterSpacing: 0.5,
   },
   conflictBadge: {
-    backgroundColor: '#e53e3e',
-    borderRadius: 10,
+    backgroundColor: Colors.orange,
+    borderRadius: Radii.pill,
     minWidth: 20,
     height: 20,
     alignItems: 'center',
@@ -709,76 +718,82 @@ const styles = StyleSheet.create({
     paddingHorizontal: 6,
   },
   conflictBadgeText: {
-    color: '#fff',
-    fontSize: 10,
-    fontWeight: '800',
+    color: Colors.white,
+    fontSize: Typography.fontSizeXs,
+    fontWeight: Typography.fontWeightBold,
   },
   topBar: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: 24,
-    paddingVertical: 12,
+    paddingHorizontal: Spacing.lg,
+    paddingVertical: Spacing.md,
   },
   topBarLeft: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: Spacing.sm,
   },
   brandText: {
-    fontSize: 20,
-    fontWeight: '800',
-    color: '#0058be',
+    fontSize: Typography.fontSizeXl,
+    fontWeight: Typography.fontWeightBold,
+    color: Colors.tealLight,
     letterSpacing: -0.5,
   },
   logoutBtn: {
     paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 8,
-    backgroundColor: '#f2f3ff',
+    paddingVertical: Spacing.sm,
+    borderRadius: Radii.md,
+    backgroundColor: Colors.bgSurface,
+    borderWidth: 1,
+    borderColor: Colors.border,
   },
   logoutText: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#565e74',
+    fontSize: Typography.fontSizeSm,
+    fontWeight: Typography.fontWeightSemibold,
+    color: Colors.textSecondary,
   },
   scroll: {
     flex: 1,
   },
   scrollContent: {
-    paddingHorizontal: 24,
+    paddingHorizontal: Spacing.lg,
     paddingBottom: 100,
   },
   hero: {
-    marginBottom: 24,
+    marginBottom: Spacing.lg,
+    marginTop: Spacing.md,
   },
   heroEyebrow: {
-    fontSize: 11,
-    fontWeight: '600',
+    fontSize: Typography.fontSizeXs,
+    fontWeight: Typography.fontWeightSemibold,
     letterSpacing: 2,
-    color: '#565e74',
+    color: Colors.tealMid,
     marginBottom: 4,
+    textTransform: 'uppercase',
   },
   heroTitle: {
-    fontSize: 34,
-    fontWeight: '800',
-    color: '#131b2e',
-    marginBottom: 10,
+    fontSize: 32,
+    fontWeight: Typography.fontWeightBold,
+    color: Colors.textPrimary,
+    marginBottom: Spacing.sm,
   },
   heroSubtitle: {
-    fontSize: 14,
-    color: '#565e74',
+    fontSize: Typography.fontSizeMd,
+    color: Colors.textSecondary,
     lineHeight: 21,
   },
   statusRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#f2f3ff',
-    paddingHorizontal: 16,
+    backgroundColor: Colors.bgGlass,
+    paddingHorizontal: Spacing.md,
     paddingVertical: 10,
-    borderRadius: 12,
+    borderRadius: Radii.lg,
+    borderWidth: 1,
+    borderColor: Colors.border,
     alignSelf: 'flex-start',
-    gap: 12,
+    gap: Spacing.md,
   },
   statusPill: {
     flexDirection: 'row',
@@ -789,99 +804,105 @@ const styles = StyleSheet.create({
     width: 10,
     height: 10,
     borderRadius: 5,
-    backgroundColor: '#006947',
+    backgroundColor: Colors.verified,
   },
   statusText: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#131b2e',
+    fontSize: Typography.fontSizeSm,
+    fontWeight: Typography.fontWeightSemibold,
+    color: Colors.textPrimary,
   },
   divider: {
     width: 1,
     height: 16,
-    backgroundColor: '#c2c6d6',
+    backgroundColor: Colors.border,
   },
   statusPeers: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#0058be',
+    fontSize: Typography.fontSizeSm,
+    fontWeight: Typography.fontWeightSemibold,
+    color: Colors.tealLight,
   },
   alertCard: {
-    backgroundColor: '#ffdad6',
-    borderRadius: 24,
-    padding: 24,
-    marginBottom: 20,
+    backgroundColor: Colors.conflictFaint,
+    borderRadius: Radii.xl,
+    padding: Spacing.lg,
+    marginBottom: Spacing.lg,
+    borderWidth: 1,
+    borderColor: Colors.borderWarn,
   },
   alertBadge: {
-    backgroundColor: 'rgba(147,0,10,0.1)',
+    backgroundColor: Colors.orangeFaint,
     alignSelf: 'flex-start',
     paddingHorizontal: 10,
     paddingVertical: 4,
-    borderRadius: 20,
-    marginBottom: 12,
+    borderRadius: Radii.pill,
+    marginBottom: Spacing.md,
   },
   alertBadgeText: {
-    fontSize: 10,
-    fontWeight: '700',
+    fontSize: Typography.fontSizeXs,
+    fontWeight: Typography.fontWeightBold,
     letterSpacing: 1.5,
-    color: '#93000a',
+    color: Colors.orange,
   },
   alertTitle: {
-    fontSize: 24,
-    fontWeight: '800',
-    color: '#93000a',
-    marginBottom: 8,
+    fontSize: Typography.fontSizeXxl,
+    fontWeight: Typography.fontWeightBold,
+    color: Colors.orangeLight,
+    marginBottom: Spacing.sm,
   },
   alertDesc: {
-    fontSize: 14,
-    color: 'rgba(147,0,10,0.8)',
+    fontSize: Typography.fontSizeMd,
+    color: Colors.textSecondary,
     lineHeight: 21,
   },
   statsGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 10,
-    marginBottom: 24,
+    marginBottom: Spacing.lg,
   },
   statCard: {
-    backgroundColor: '#f2f3ff',
-    borderRadius: 16,
-    padding: 16,
+    backgroundColor: Colors.bgGlass,
+    borderRadius: Radii.lg,
+    padding: Spacing.md,
     width: '48%',
     flexGrow: 1,
     flexBasis: '40%',
+    borderWidth: 1,
+    borderColor: Colors.border,
   },
   statValue: {
-    fontSize: 18,
-    fontWeight: '800',
-    color: '#131b2e',
+    fontSize: Typography.fontSizeLg,
+    fontWeight: Typography.fontWeightBold,
+    color: Colors.tealLight,
     marginBottom: 4,
   },
   statLabel: {
-    fontSize: 12,
-    color: '#565e74',
-    fontWeight: '500',
+    fontSize: Typography.fontSizeSm,
+    color: Colors.textSecondary,
+    fontWeight: Typography.fontWeightMedium,
   },
   sectionTitle: {
-    fontSize: 20,
-    fontWeight: '800',
-    color: '#131b2e',
-    marginBottom: 16,
+    fontSize: Typography.fontSizeXl,
+    fontWeight: Typography.fontWeightBold,
+    color: Colors.textPrimary,
+    marginBottom: Spacing.md,
   },
   infoSection: {
-    marginBottom: 20,
+    marginBottom: Spacing.lg,
   },
   capabilityList: {
-    gap: 10,
+    gap: Spacing.sm,
   },
   capRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#f2f3ff',
-    borderRadius: 12,
-    paddingHorizontal: 16,
+    backgroundColor: Colors.bgGlass,
+    borderRadius: Radii.md,
+    paddingHorizontal: Spacing.md,
     paddingVertical: 14,
     gap: 10,
+    borderWidth: 1,
+    borderColor: Colors.border,
   },
   capDot: {
     width: 8,
@@ -889,134 +910,144 @@ const styles = StyleSheet.create({
     borderRadius: 4,
   },
   capDotActive: {
-    backgroundColor: '#006947',
+    backgroundColor: Colors.verified,
   },
   capDotPending: {
-    backgroundColor: '#c2c6d6',
+    backgroundColor: Colors.offline,
   },
   capLabel: {
     flex: 1,
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#131b2e',
+    fontSize: Typography.fontSizeMd,
+    fontWeight: Typography.fontWeightSemibold,
+    color: Colors.textPrimary,
   },
   capStatus: {
-    fontSize: 12,
-    fontWeight: '700',
+    fontSize: Typography.fontSizeSm,
+    fontWeight: Typography.fontWeightBold,
   },
   capStatusActive: {
-    color: '#006947',
+    color: Colors.verified,
   },
   capStatusPending: {
-    color: '#9da3b0',
+    color: Colors.offline,
   },
   detailCard: {
-    backgroundColor: '#f2f3ff',
-    borderRadius: 20,
-    padding: 20,
-    marginBottom: 16,
-    gap: 12,
+    backgroundColor: Colors.bgGlass,
+    borderRadius: Radii.xl,
+    padding: Spacing.lg,
+    marginBottom: Spacing.md,
+    gap: Spacing.md,
+    borderWidth: 1,
+    borderColor: Colors.border,
   },
   detailCardTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#131b2e',
+    fontSize: Typography.fontSizeLg,
+    fontWeight: Typography.fontWeightBold,
+    color: Colors.tealLight,
     marginBottom: 4,
   },
   detailRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'flex-start',
-    gap: 12,
+    gap: Spacing.md,
   },
   detailLabel: {
-    fontSize: 13,
-    color: '#565e74',
-    fontWeight: '500',
+    fontSize: Typography.fontSizeSm,
+    color: Colors.textSecondary,
+    fontWeight: Typography.fontWeightMedium,
     flexShrink: 0,
   },
   detailValue: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#131b2e',
+    fontSize: Typography.fontSizeSm,
+    fontWeight: Typography.fontWeightSemibold,
+    color: Colors.textPrimary,
     textAlign: 'right',
     flexShrink: 1,
   },
   detailValueMono: {
     fontFamily: 'monospace',
-    fontSize: 11,
+    fontSize: Typography.fontSizeXs,
+    color: Colors.tealLight,
   },
   detailValueGreen: {
-    color: '#006947',
+    color: Colors.verified,
   },
   detailValueRed: {
-    color: '#93000a',
+    color: Colors.orange,
   },
   codeCard: {
-    backgroundColor: '#131b2e',
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 16,
+    backgroundColor: Colors.bgSurface,
+    borderRadius: Radii.lg,
+    padding: Spacing.md,
+    marginBottom: Spacing.md,
+    borderWidth: 1,
+    borderColor: Colors.border,
   },
   codeTitle: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: '#9da3b0',
-    marginBottom: 8,
+    fontSize: Typography.fontSizeSm,
+    fontWeight: Typography.fontWeightBold,
+    color: Colors.textSecondary,
+    marginBottom: Spacing.sm,
     letterSpacing: 1,
+    textTransform: 'uppercase',
   },
   codeText: {
     fontSize: 10,
     fontFamily: 'monospace',
-    color: '#dae2fd',
+    color: Colors.tealLight,
     lineHeight: 16,
   },
   auditActions: {
-    gap: 12,
-    marginBottom: 24,
+    gap: Spacing.md,
+    marginBottom: Spacing.lg,
   },
   button: {
-    backgroundColor: '#0058be',
-    borderRadius: 14,
+    backgroundColor: Colors.teal,
+    borderRadius: Radii.lg,
     paddingVertical: 16,
     alignItems: 'center',
   },
   buttonDisabled: {
-    backgroundColor: '#c2c6d6',
+    backgroundColor: Colors.bgSurface,
   },
   buttonText: {
-    color: '#ffffff',
-    fontSize: 16,
-    fontWeight: '700',
+    color: Colors.white,
+    fontSize: Typography.fontSizeLg,
+    fontWeight: Typography.fontWeightBold,
   },
   dangerButton: {
-    backgroundColor: '#ffdad6',
-    borderRadius: 14,
+    backgroundColor: Colors.conflictFaint,
+    borderRadius: Radii.lg,
     paddingVertical: 14,
     alignItems: 'center',
+    borderWidth: 1,
+    borderColor: Colors.borderWarn,
   },
   dangerButtonText: {
-    color: '#93000a',
-    fontSize: 14,
-    fontWeight: '700',
+    color: Colors.orange,
+    fontSize: Typography.fontSizeMd,
+    fontWeight: Typography.fontWeightBold,
   },
   infoBox: {
-    backgroundColor: '#f2f3ff',
-    borderRadius: 20,
-    padding: 20,
+    backgroundColor: Colors.bgGlass,
+    borderRadius: Radii.xl,
+    padding: Spacing.lg,
     borderLeftWidth: 4,
-    borderLeftColor: '#0058be',
-    marginBottom: 20,
+    borderLeftColor: Colors.teal,
+    marginBottom: Spacing.lg,
+    borderWidth: 1,
+    borderColor: Colors.border,
   },
   infoBoxTitle: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: '#131b2e',
-    marginBottom: 8,
+    fontSize: Typography.fontSizeMd,
+    fontWeight: Typography.fontWeightBold,
+    color: Colors.tealLight,
+    marginBottom: Spacing.sm,
   },
   infoBoxText: {
-    fontSize: 13,
-    color: '#565e74',
+    fontSize: Typography.fontSizeSm,
+    color: Colors.textSecondary,
     lineHeight: 20,
   },
   bottomNav: {
@@ -1024,35 +1055,37 @@ const styles = StyleSheet.create({
     bottom: 0,
     left: 0,
     right: 0,
-    backgroundColor: 'rgba(250,248,255,0.95)',
+    backgroundColor: 'rgba(5, 13, 20, 0.95)',
     borderTopWidth: 1,
-    borderTopColor: 'rgba(19,27,46,0.1)',
+    borderTopColor: Colors.border,
     paddingBottom: 24,
   },
   bottomNavContent: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 8,
+    paddingVertical: Spacing.md,
+    paddingHorizontal: Spacing.sm,
     gap: 4,
   },
   tabBtn: {
     alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 12,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
+    borderRadius: Radii.md,
   },
   tabBtnActive: {
-    backgroundColor: '#f2f3ff',
+    backgroundColor: Colors.tealFaint,
+    borderWidth: 1,
+    borderColor: Colors.borderFocus,
   },
   tabLabel: {
-    fontSize: 12,
-    fontWeight: '600',
+    fontSize: Typography.fontSizeXs,
+    fontWeight: Typography.fontWeightSemibold,
     letterSpacing: 1,
     textTransform: 'uppercase',
-    color: '#565e74',
+    color: Colors.textMuted,
   },
   tabLabelActive: {
-    color: '#0058be',
+    color: Colors.tealLight,
   },
 });
